@@ -1,0 +1,55 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-accent: #4c6ef5;
+  --color-ink: #1a1f2b;
+  --color-sub: #6b7280;
+  --color-faint: #9096a1;
+  --color-line: #eceef2;
+  --color-page: #f7f8fa;
+  --color-good: #15803d;
+  --color-bad: #b91c1c;
+  --color-warn: #b45309;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-page text-ink text-sm antialiased;
+  font-family: var(--font-sans);
+}
+
+.card {
+  @apply rounded-xl border border-line bg-white;
+}
+
+.label-xs {
+  @apply text-[11px] font-medium uppercase tracking-wide text-sub;
+}
+
+.btn {
+  @apply inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-line bg-white px-2.5 py-1.5 text-[12.5px] text-ink transition-colors hover:bg-page;
+}
+
+.btn-accent {
+  @apply border-accent/30 bg-accent/5 text-accent hover:bg-accent/10;
+}
+
+.chip {
+  @apply inline-flex cursor-pointer select-none items-center gap-1.5 rounded-full border border-line bg-white px-2.5 py-1 text-[12px] transition-opacity;
+}
+
+.chip-off {
+  @apply opacity-40;
+}
+
+input[type='date'] {
+  @apply rounded-lg border border-line bg-white px-2 py-1.5 text-[12.5px];
+}
+
+select {
+  @apply rounded-lg border border-line bg-white px-2 py-1.5 text-[12.5px];
+}

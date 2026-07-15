@@ -1,0 +1,23 @@
+{
+  "name": "fn-analytics",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Form Now production operations analytics — local-only cockpit reading Formlabs Redash",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,magenta \"npm run dev -w server\" \"npm run dev -w web\"",
+    "dev:mock": "concurrently -n server,web -c blue,magenta \"MOCK=1 npm run dev -w server\" \"npm run dev -w web\"",
+    "build": "npm run typecheck && npm run build -w web",
+    "start": "NODE_ENV=production npm run start -w server",
+    "start:mock": "MOCK=1 NODE_ENV=production npm run start -w server",
+    "typecheck": "tsc --noEmit -p server/tsconfig.json && tsc --noEmit -p web/tsconfig.json",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "_comment": "Editable ops-metrics exclusion config. The server re-reads this file on every request.",
+  "testStations": [
+    "Test",
+    "Test 2",
+    "Haip Dev 2",
+    "Haip Dev Localhost",
+    "Niko's Computer",
+    "Sean Duffy Computer"
+  ],
+  "nonLineOperators": [
+    "Jacob Haip",
+    "David Lakatos",
+    "Ben Shey",
+    "Jani Molnar"
+  ],
+  "revenueSentinelBillingId": "external-fcm-sales-789!",
+  "stuckThresholdDays": 3,
+  "maxPartVolumeMl": 25000,
+  "stationAppDataSince": "2026-07-02"
+}

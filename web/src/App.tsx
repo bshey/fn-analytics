@@ -1,0 +1,41 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { FiltersProvider } from './lib/filters'
+import { Layout } from './components/Layout'
+import ShipmentsPage from './modules/shipments'
+import WipPage from './modules/wip'
+import OrdersPage from './modules/orders'
+import FloorPage from './modules/floor'
+import PredictorPage from './modules/predictor'
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 5 * 60_000,
+      retry: 0, // Redash errors carry actionable hints (VPN, key) — fail fast, don't hammer.
+      refetchOnWindowFocus: false,
+    },
+  },
+})
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <FiltersProvider>
+        <BrowserRouter>
+          <Routes>
+            <Route element={<Layout />}>
+              <Route path="/" element={<Navigate to="/shipments" replace />} />
+              <Route path="/shipments" element={<ShipmentsPage />} />
+              <Route path="/wip" element={<WipPage />} />
+              <Route path="/orders" element={<OrdersPage />} />
+              <Route path="/floor" element={<FloorPage />} />
+              <Route path="/predictor" element={<PredictorPage />} />
+              <Route path="*" element={<Navigate to="/shipments" replace />} />
+            </Route>
+          </Routes>
+        </BrowserRouter>
+      </FiltersProvider>
+    </QueryClientProvider>
+  )
+}
