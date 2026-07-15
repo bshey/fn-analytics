@@ -29,11 +29,24 @@ export interface Exclusions {
   maxPartVolumeMl: number
 }
 
-const EXCLUSIONS_PATH = resolve(repoRoot, 'config', 'exclusions.json')
+// Serverless bundlers relocate this module, so repoRoot can point outside the
+// deployed bundle — fall back to the process cwd (Vercel runs at /var/task).
+const EXCLUSIONS_CANDIDATES = [
+  resolve(repoRoot, 'config', 'exclusions.json'),
+  resolve(process.cwd(), 'config', 'exclusions.json'),
+]
 
 /** Re-read on every call so edits to config/exclusions.json apply without a restart. */
 export function loadExclusions(): Exclusions {
-  const raw = JSON.parse(readFileSync(EXCLUSIONS_PATH, 'utf8'))
+  let raw: any = {}
+  for (const path of EXCLUSIONS_CANDIDATES) {
+    try {
+      raw = JSON.parse(readFileSync(path, 'utf8'))
+      break
+    } catch {
+      // try next candidate; all defaults below apply if none is readable
+    }
+  }
   return {
     testStations: raw.testStations ?? [],
     nonLineOperators: raw.nonLineOperators ?? [],
