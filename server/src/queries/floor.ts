@@ -303,7 +303,7 @@ ORDER BY sess.started_at DESC`,
    */
   pipeline_dwell: {
     description:
-      "Order→ship pipeline dwell: median SHIFT-HOURS per stage boundary — elapsed time clipped to the configured production shift (shiftDays ISO 1=Mon..7=Sun, shiftStart/shiftEnd ET; default Mon–Fri 07:30–16:00), so off-shift waiting is not counted. '04 Printing' is machine time and stays wall-clock. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED], DFM→cleared-for-production = print-queue entry, ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. Build stages (build queued [printbuild.created_at]→print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan→lot split) and lot tracks (split→finishing scan / bin-ship scan / quarantine scan; quarantine→processed) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. 'Quarantine → processed' = quarantine-line scan until the lot's next station event; lots still parked count at their current age (a lower bound), anchored to today. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >720 shift-hours discarded. Cohort anchor = when the stage COMPLETED.",
+      "Order→ship pipeline dwell: median SHIFT-HOURS per stage boundary — elapsed time clipped to the configured production shift (shiftDays ISO 1=Mon..7=Sun, shiftStart/shiftEnd ET; default Mon–Fri 07:30–16:00), so off-shift waiting is not counted. '04 Printing' is machine time and stays wall-clock. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED], DFM→cleared-for-production = print-queue entry, ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. Build stages (build queued [printbuild.created_at]→print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan→lot split) and lot tracks (split→finishing scan / bin-ship scan / quarantine scan; quarantine→processed) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. 'Quarantine → processed' = quarantine-line scan until the lot's next station event of any kind (incl. child-lot splits via parent_lot_guid); pass/fail scans are skipped for ~2/3 of routed lots (verified — most belong to shipped orders), so un-dispositioned lots count until their order shipped, or until now while the order is still open. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >720 shift-hours discarded. Cohort anchor = when the stage COMPLETED.",
     source:
       'fcm_api_order/orderpart/orderevent/printbuild(+parts) + manufacturing_events (station app) + formcloud_manufacturing.master_table (Tulip)',
     params: zBaseFilters.extend({
@@ -403,7 +403,7 @@ bsplit AS (
   GROUP BY e.print_build_id
 ),
 lots AS (
-  SELECT e.lot_guid, MIN(e.timestamp) AS split_ts
+  SELECT e.lot_guid, ANY_VALUE(e.order_id) AS order_id, MIN(e.timestamp) AS split_ts
   FROM ${T.mfgEvent} e
   JOIN ${T.orderPart} op ON op.guid = e.order_part_id
   WHERE e.source = 'STATION_APP' AND e.event_type = 'LOT_SPLIT'
@@ -420,12 +420,14 @@ scans AS (
 qdisp AS (
   -- Processed = the lot's next station event of ANY type after the quarantine
   -- scan (incl. being split into a child lot, matched via parent_lot_guid).
-  -- Lots still parked have no next event; they are counted at their current
-  -- age (COALESCE to now downstream) so the stage can't read near-zero just
-  -- because the slow lots haven't exited yet.
-  SELECT s.lot_guid, s.ts AS routed_at, MIN(nxt.ts2) AS disp_at
+  -- ~2/3 of routed lots never get their pass/fail scanned (verified: most such
+  -- lots belong to SHIPPED orders), so lots with no recorded disposition count
+  -- until their order shipped — the latest they could have been processed —
+  -- or until now (COALESCE downstream) only while the order is still open.
+  SELECT s.lot_guid, s.ts AS routed_at, COALESCE(MIN(nxt.ts2), f.shipped_at) AS disp_at
   FROM scans s
   JOIN lots l ON l.lot_guid = s.lot_guid
+  JOIN flt f ON f.id = l.order_id
   LEFT JOIN (
     SELECT lot_guid AS lg, timestamp AS ts2 FROM ${T.mfgEvent}
     WHERE source = 'STATION_APP' AND event_type NOT IN ('Quarantine - Routing', 'SIGN_IN', 'SIGN_OUT')
@@ -434,7 +436,7 @@ qdisp AS (
     WHERE source = 'STATION_APP' AND event_type = 'LOT_SPLIT'
   ) nxt ON nxt.lg = s.lot_guid AND nxt.ts2 > s.ts
   WHERE s.event_type = 'Quarantine - Routing'
-  GROUP BY s.lot_guid, s.ts
+  GROUP BY s.lot_guid, s.ts, f.shipped_at
 ),
 intervals AS (
   SELECT '01 Accepted → DFM approved' AS stage, DATE(d.dfm_done) AS anchor,
