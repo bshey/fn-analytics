@@ -289,24 +289,45 @@ ORDER BY sess.started_at DESC`,
    * verified against real warehouse data (recon 2026-07-10):
    *   order: accepted → DFM approved → cleared (print queue) … ready → shipped
    *   build: queued → print start → print end → wash/sift scan → lot split
-   *   lot:   split → {finishing | bin/ship | quarantine} scan; quarantine → dispositioned
+   *   lot:   split → {finishing | bin/ship | quarantine} scan; quarantine → processed
    * Legacy traps deliberately avoided: started_processing_at (dead since Jun'26),
    * printbuild.status (sticky), zdobb wash start (dead), QC1/2 columns,
    * gpygu quarantine end (dead). Tulip↔build linkage uses the station-app bridge
    * (lot_guid+print_build_id on the same event row), which exists since 2026-07-02 —
    * build/lot stages are effectively station-era.
+   *
+   * Durations count SHIFT HOURS only (owner request): elapsed time is clipped
+   * to the configured shift window (default Mon–Fri 07:30–16:00 ET) so overnight
+   * and weekend waiting doesn't inflate dwell. Exception: '04 Printing' stays
+   * wall-clock — printers run unattended.
    */
   pipeline_dwell: {
     description:
-      "Order→ship pipeline dwell: median hours per stage boundary, all boundaries verified against real events. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED], DFM→cleared-for-production = print-queue entry, ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. Build stages (build queued [printbuild.created_at]→print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan→lot split) and lot tracks (split→finishing scan / bin-ship scan / quarantine scan; quarantine→dispositioned) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >30 days discarded. Cohort anchor = when the stage COMPLETED.",
+      "Order→ship pipeline dwell: median SHIFT-HOURS per stage boundary — elapsed time clipped to the configured production shift (shiftDays ISO 1=Mon..7=Sun, shiftStart/shiftEnd ET; default Mon–Fri 07:30–16:00), so off-shift waiting is not counted. '04 Printing' is machine time and stays wall-clock. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED], DFM→cleared-for-production = print-queue entry, ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. Build stages (build queued [printbuild.created_at]→print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan→lot split) and lot tracks (split→finishing scan / bin-ship scan / quarantine scan; quarantine→processed) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. 'Quarantine → processed' = quarantine-line scan until the lot's next station event; lots still parked count at their current age (a lower bound), anchored to today. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >720 shift-hours discarded. Cohort anchor = when the stage COMPLETED.",
     source:
       'fcm_api_order/orderpart/orderevent/printbuild(+parts) + manufacturing_events (station app) + formcloud_manufacturing.master_table (Tulip)',
-    params: zBaseFilters.extend({ mode: z.enum(['window', 'trend']).default('window') }),
+    params: zBaseFilters.extend({
+      shiftDays: z.array(z.number().int().min(1).max(7)).nonempty().default([1, 2, 3, 4, 5]),
+      shiftStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default('07:30'),
+      shiftEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/).default('16:00'),
+    }).refine((v) => v.shiftEnd > v.shiftStart, { message: 'shiftEnd must be after shiftStart' }),
     sql: (p, ctx) => {
       const partConds: string[] = []
       if (p.materials.length) partConds.push(`op.material IN (${sqlStringList(p.materials)})`)
       if (p.mfgTypes.length) partConds.push(`op.manufacturing_type IN (${sqlStringList(p.mfgTypes)})`)
       const partFilter = partConds.length ? `AND ${partConds.join(' AND ')}` : ''
+      // ISO weekday (Mon=1..Sun=7) → BigQuery DAYOFWEEK (Sun=1..Sat=7).
+      const bqDays = [...new Set<number>(p.shiftDays)].map((d) => (d % 7) + 1).join(', ')
+      // Shift-hours between two timestamps: overlap with [shiftStart, shiftEnd]
+      // ET on each selected weekday. NULL when either endpoint is NULL or the
+      // interval is negative (empty date array) — filtered like the old <0 rule.
+      const sh = (from: string, to: string) => `(
+    SELECT SUM(GREATEST(TIMESTAMP_DIFF(
+      LEAST(${to}, TIMESTAMP(DATETIME(day, TIME '${p.shiftEnd}:00'), 'America/New_York')),
+      GREATEST(${from}, TIMESTAMP(DATETIME(day, TIME '${p.shiftStart}:00'), 'America/New_York')),
+      SECOND), 0)) / 3600.0
+    FROM UNNEST(GENERATE_DATE_ARRAY(DATE(${from}, 'America/New_York'), DATE(${to}, 'America/New_York'))) AS day
+    WHERE EXTRACT(DAYOFWEEK FROM day) IN (${bqDays}))`
       return `
 WITH ${classifiedOrdersCTEs(
         `o.status NOT IN ('QUOTING', 'CANCELLED')
@@ -397,13 +418,17 @@ scans AS (
   GROUP BY lot_guid, event_type
 ),
 qdisp AS (
+  -- Processed = the lot's next station event of ANY type after the quarantine
+  -- scan (incl. being split into a child lot, matched via parent_lot_guid).
+  -- Lots still parked have no next event; they are counted at their current
+  -- age (COALESCE to now downstream) so the stage can't read near-zero just
+  -- because the slow lots haven't exited yet.
   SELECT s.lot_guid, s.ts AS routed_at, MIN(nxt.ts2) AS disp_at
   FROM scans s
   JOIN lots l ON l.lot_guid = s.lot_guid
   LEFT JOIN (
     SELECT lot_guid AS lg, timestamp AS ts2 FROM ${T.mfgEvent}
-    WHERE source = 'STATION_APP'
-      AND event_type IN ('Pending Binning', 'Pending Finishing', 'Waiting to Repeat MediaBlast', 'Lot Created')
+    WHERE source = 'STATION_APP' AND event_type NOT IN ('Quarantine - Routing', 'SIGN_IN', 'SIGN_OUT')
     UNION ALL
     SELECT JSON_VALUE(payload, '$.parent_lot_guid'), timestamp FROM ${T.mfgEvent}
     WHERE source = 'STATION_APP' AND event_type = 'LOT_SPLIT'
@@ -413,47 +438,49 @@ qdisp AS (
 ),
 intervals AS (
   SELECT '01 Accepted → DFM approved' AS stage, DATE(d.dfm_done) AS anchor,
-         TIMESTAMP_DIFF(d.dfm_done, f.accepted_at, MINUTE) / 60.0 AS hours
+         ${sh('f.accepted_at', 'd.dfm_done')} AS hours
   FROM flt f JOIN dfm d ON d.order_id = f.id
   UNION ALL
   SELECT '02 DFM approved → print queue', DATE(c.cleared_at),
-         TIMESTAMP_DIFF(c.cleared_at, d.dfm_done, MINUTE) / 60.0
+         ${sh('d.dfm_done', 'c.cleared_at')}
   FROM dfm d JOIN cleared c ON c.order_id = d.order_id
   UNION ALL
   SELECT '03 Build queued → print start', DATE(b.print_start),
-         TIMESTAMP_DIFF(b.print_start, b.created_at, MINUTE) / 60.0
+         ${sh('b.created_at', 'b.print_start')}
   FROM bstage b
   UNION ALL
+  -- Printing is machine time: printers run overnight, so wall-clock, not shift.
   SELECT '04 Printing', DATE(b.print_end),
          TIMESTAMP_DIFF(b.print_end, b.print_start, MINUTE) / 60.0
   FROM bstage b
   UNION ALL
   SELECT '05 Print end → wash/sift scan', DATE(b.wash_at),
-         TIMESTAMP_DIFF(b.wash_at, b.print_end, MINUTE) / 60.0
+         ${sh('b.print_end', 'b.wash_at')}
   FROM bstage b
   UNION ALL
   SELECT '06 Wash scan → lot split', DATE(sp.split_at),
-         TIMESTAMP_DIFF(sp.split_at, b.wash_at, MINUTE) / 60.0
+         ${sh('b.wash_at', 'sp.split_at')}
   FROM bstage b JOIN bsplit sp ON sp.print_build_id = b.guid
   UNION ALL
   SELECT '07 Lot split → finishing scan', DATE(s.ts),
-         TIMESTAMP_DIFF(s.ts, l.split_ts, MINUTE) / 60.0
+         ${sh('l.split_ts', 's.ts')}
   FROM lots l JOIN scans s ON s.lot_guid = l.lot_guid AND s.event_type = 'Pending Finishing'
   UNION ALL
   SELECT '08 Lot split → bin/ship scan', DATE(s.ts),
-         TIMESTAMP_DIFF(s.ts, l.split_ts, MINUTE) / 60.0
+         ${sh('l.split_ts', 's.ts')}
   FROM lots l JOIN scans s ON s.lot_guid = l.lot_guid AND s.event_type = 'Pending Binning'
   UNION ALL
   SELECT '09 Lot split → quarantine scan', DATE(s.ts),
-         TIMESTAMP_DIFF(s.ts, l.split_ts, MINUTE) / 60.0
+         ${sh('l.split_ts', 's.ts')}
   FROM lots l JOIN scans s ON s.lot_guid = l.lot_guid AND s.event_type = 'Quarantine - Routing'
   UNION ALL
-  SELECT '10 Quarantine → dispositioned', DATE(q.disp_at),
-         TIMESTAMP_DIFF(q.disp_at, q.routed_at, MINUTE) / 60.0
-  FROM qdisp q WHERE q.disp_at IS NOT NULL
+  -- Still-parked lots count at their current age (lower bound), anchored today.
+  SELECT '10 Quarantine → processed', DATE(COALESCE(q.disp_at, CURRENT_TIMESTAMP())),
+         ${sh('q.routed_at', 'COALESCE(q.disp_at, CURRENT_TIMESTAMP())')}
+  FROM qdisp q
   UNION ALL
   SELECT '11 Ready to ship → shipped', DATE(f.shipped_at),
-         TIMESTAMP_DIFF(f.shipped_at, r.ready_at, MINUTE) / 60.0
+         ${sh('r.ready_at', 'f.shipped_at')}
   FROM flt f JOIN ready r ON r.order_id = f.id
   WHERE f.shipped_at IS NOT NULL
 ),
@@ -462,14 +489,8 @@ d AS (
   WHERE hours IS NOT NULL AND hours >= 0 AND hours <= 720
     AND anchor BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}
 )
-${
-  p.mode === 'window'
-    ? `SELECT stage, COUNT(*) AS n, ROUND(APPROX_QUANTILES(hours, 100)[OFFSET(50)], 2) AS median_hours
+SELECT stage, COUNT(*) AS n, ROUND(APPROX_QUANTILES(hours, 100)[OFFSET(50)], 2) AS median_hours
 FROM d GROUP BY stage ORDER BY stage`
-    : `SELECT CAST(${grainExpr('anchor', p.grain)} AS STRING) AS period, stage, COUNT(*) AS n,
-  ROUND(APPROX_QUANTILES(hours, 100)[OFFSET(50)], 2) AS median_hours
-FROM d GROUP BY period, stage ORDER BY period, stage`
-}`
     },
     mock: (p) => {
       const STAGES: [string, number][] = [
@@ -482,30 +503,17 @@ FROM d GROUP BY period, stage ORDER BY period, stage`
         ['07 Lot split → finishing scan', 3],
         ['08 Lot split → bin/ship scan', 2],
         ['09 Lot split → quarantine scan', 4],
-        ['10 Quarantine → dispositioned', 30],
+        ['10 Quarantine → processed', 30],
         ['11 Ready to ship → shipped', 1],
       ]
-      const r = rng(`pipe:${p.grain}:${p.mode}`)
-      const scale = GRAIN_SCALE[p.grain] ?? 1
-      if (p.mode === 'window') {
-        return STAGES.map(([stage, base]) => ({
-          stage,
-          n: Math.max(5, Math.round((250 + r() * 200) * (stage.startsWith('09') || stage.startsWith('10') ? 0.25 : 1))),
-          median_hours: Math.round(base * (0.8 + r() * 0.5) * 100) / 100,
-        }))
-      }
-      const rows: Row[] = []
-      for (const period of periodsBetween(p.start, p.end, p.grain)) {
-        for (const [stage, base] of STAGES) {
-          rows.push({
-            period,
-            stage,
-            n: Math.max(2, Math.round((100 + r() * 80) * scale * 0.5)),
-            median_hours: Math.round(base * (0.7 + r() * 0.7) * 100) / 100,
-          })
-        }
-      }
-      return rows
+      const r = rng(`pipe:${p.grain}:${p.shiftStart}${p.shiftEnd}${p.shiftDays.join('')}`)
+      // Narrower shift windows clip more elapsed time out of every dwell.
+      const shiftFactor = Math.min(1, (p.shiftDays.length / 5) * 0.9 + 0.1)
+      return STAGES.map(([stage, base]) => ({
+        stage,
+        n: Math.max(5, Math.round((250 + r() * 200) * (stage.startsWith('09') || stage.startsWith('10') ? 0.25 : 1))),
+        median_hours: Math.round(base * shiftFactor * (0.8 + r() * 0.5) * 100) / 100,
+      }))
     },
   },
 

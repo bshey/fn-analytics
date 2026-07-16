@@ -83,9 +83,11 @@ function StationsSection({ since, stationTypes }: { since: string; stationTypes:
   const grain = filters.grain
   const thru = useNamedQuery('floor_station_throughput', { ...queryParams, stationTypes })
   const [mode, setMode] = useState<'type' | 'station'>('type')
-  const [dwellMode, setDwellMode] = useState<'window' | 'trend'>('window')
-  const [dwellStage, setDwellStage] = useState<string>('')
-  const dwell = useNamedQuery('pipeline_dwell', { ...queryParams, mode: dwellMode })
+  // Production shift window for dwell counting (ISO days, Mon=1..Sun=7).
+  const [shiftDays, setShiftDays] = useState<number[]>([1, 2, 3, 4, 5])
+  const [shiftStart, setShiftStart] = useState('07:30')
+  const [shiftEnd, setShiftEnd] = useState('16:00')
+  const dwell = useNamedQuery('pipeline_dwell', { ...queryParams, shiftDays, shiftStart, shiftEnd })
   const thruRef = useRef<EChartHandle>(null)
   const dwellRef = useRef<EChartHandle>(null)
 
@@ -148,65 +150,37 @@ function StationsSection({ since, stationTypes }: { since: string; stationTypes:
 
   const dwellRows = dwell.data?.rows ?? []
   const stageLabel = (s: string) => s.replace(/^\d+\s*/, '')
-  const dwellStages = useMemo(
-    () => [...new Set(dwellRows.map((r) => String(r.stage)))].sort(),
-    [dwellRows],
-  )
-  const activeStage = dwellStages.includes(dwellStage) ? dwellStage : (dwellStages[0] ?? '')
 
   const dwellChart = useMemo(() => {
     if (!dwellRows.length) return null
-    if (dwellMode === 'window') {
-      // One horizontal bar per production step, in process order (first step on top).
-      const rows = [...dwellRows].sort((a, b) => String(b.stage).localeCompare(String(a.stage)))
-      return {
-        option: {
-          tooltip: {
-            trigger: 'item',
-            formatter: (prm: { name?: string; value?: unknown; data?: { n?: number } }) =>
-              `${prm.name}: <b>${Number(prm.value).toFixed(1)} h</b> <span style="color:#898781">(n=${prm.data?.n ?? '?'})</span>`,
-          },
-          grid: { ...gridDefaults, left: 12, top: 8 },
-          xAxis: { type: 'value', axisLabel: { formatter: '{value} h' } },
-          yAxis: { type: 'category', data: rows.map((r) => stageLabel(String(r.stage))) },
-          series: [
-            {
-              type: 'bar',
-              barMaxWidth: 16,
-              itemStyle: { borderRadius: [0, 3, 3, 0] },
-              color: seriesColor('Median hours'),
-              data: rows.map((r) => ({ value: num0(r.median_hours), n: num0(r.n) })),
-            },
-          ],
-        },
-        provisional: false,
-      }
-    }
-    // Trend: one line for the selected stage.
-    const rows = dwellRows.filter((r) => String(r.stage) === activeStage)
-    const periods = rows.map((r) => String(r.period))
+    // One horizontal bar per production step, in process order (first step on top).
+    const rows = [...dwellRows].sort((a, b) => String(b.stage).localeCompare(String(a.stage)))
     return {
       option: {
         tooltip: {
-          trigger: 'axis',
-          valueFormatter: (v: unknown) => (v == null ? '—' : `${Number(v).toFixed(1)} h`),
+          trigger: 'item',
+          formatter: (prm: { name?: string; value?: unknown; data?: { n?: number } }) =>
+            `${prm.name}: <b>${Number(prm.value).toFixed(1)} h</b> <span style="color:#898781">(n=${prm.data?.n ?? '?'})</span>`,
         },
-        grid: gridDefaults,
-        xAxis: { type: 'category', data: periods.map((p) => periodLabel(p, grain)) },
-        yAxis: { type: 'value', axisLabel: { formatter: '{value} h' } },
+        grid: { ...gridDefaults, left: 12, top: 8 },
+        xAxis: { type: 'value', axisLabel: { formatter: '{value} h' } },
+        yAxis: { type: 'category', data: rows.map((r) => stageLabel(String(r.stage))) },
         series: [
           {
-            ...lineDefaults,
-            name: stageLabel(activeStage),
+            type: 'bar',
+            barMaxWidth: 16,
+            itemStyle: { borderRadius: [0, 3, 3, 0] },
             color: seriesColor('Median hours'),
-            connectNulls: true,
-            data: withProvisional(rows.map((r) => num(r.median_hours)), periods, grain),
+            data: rows.map((r) => ({ value: num0(r.median_hours), n: num0(r.n) })),
           },
         ],
       },
-      provisional: hasProvisional(periods, grain),
+      provisional: false,
     }
-  }, [dwellRows, dwellMode, activeStage, grain])
+  }, [dwellRows])
+
+  const toggleShiftDay = (d: number) =>
+    setShiftDays((cur) => (cur.includes(d) ? (cur.length > 1 ? cur.filter((x) => x !== d) : cur) : [...cur, d].sort()))
 
   return (
     <div className="grid gap-4 xl:grid-cols-2">
@@ -254,14 +228,10 @@ function StationsSection({ since, stationTypes }: { since: string; stationTypes:
 
       <ChartCard
         title="Pipeline dwell — order to ship"
-        subtitle={
-          dwellMode === 'window'
-            ? 'Median hours at each pipeline stage, from order acceptance to shipment'
-            : `Median hours: ${stageLabel(activeStage)}, by stage-completion period`
-        }
+        subtitle={`Median shift-hours per stage — counting ${shiftStart}–${shiftEnd} ET on selected days`}
         info={{
           definition:
-            'The production pipeline broken into verified stage boundaries. Order level: accepted → DFM approved (all parts PASSED/AT_RISK_APPROVED) → cleared for production (print-queue entry), and ready-to-ship (last lot binned) → shipped. Build level: build queued → print start → print end (printer timestamps via Tulip) → wash/sift scan → lot split. Lot level: lot split → scan onto the finishing line / bin-ship line / quarantine line (three tracks), and quarantine → dispositioned (next routing event). Medians of per-entity elapsed hours; <0 or >30-day durations discarded; cohort = when the stage completed. Channel filter applies at order level; material & mfg-type filters apply exactly per part on lot stages, any-part on order/build stages. Build/lot stages exist since the station-app go-live (Jul 2, 2026); Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. Quarantine dwell is right-censored — undispositioned lots aren\'t counted yet.',
+            'The production pipeline broken into verified stage boundaries, measured in SHIFT-HOURS: elapsed time is clipped to the shift window set on this card (days + start/end time, ET), so overnight and weekend waiting is not counted. Printing is the exception — printers run unattended, so it stays wall-clock. Order level: accepted → DFM approved (all parts PASSED/AT_RISK_APPROVED) → cleared for production (print-queue entry), and ready-to-ship (last lot binned) → shipped. Build level: build queued → print start → print end (printer timestamps via Tulip) → wash/sift scan → lot split. Lot level: lot split → scan onto the finishing line / bin-ship line / quarantine line (three tracks), and quarantine → processed (the lot\'s next station event of any kind; lots still parked on the quarantine line count at their current age, so this is a lower bound that includes waiting inventory). Medians per entity; <0 or >720 shift-hour durations discarded; cohort = when the stage completed. Channel filter applies at order level; material & mfg-type filters apply exactly per part on lot stages, any-part on order/build stages. Build/lot stages exist since the station-app go-live (Jul 2, 2026); Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged.',
           source: 'fcm_api_order/orderpart/orderevent/printbuild + station-app events + Tulip master_table (every boundary verified against real data)',
         }}
         csvRows={dwellRows}
@@ -274,33 +244,46 @@ function StationsSection({ since, stationTypes }: { since: string; stationTypes:
         emptyText="No pipeline records in the selected range."
         height={360}
         actions={
-          <>
-            {dwellMode === 'trend' && (
-              <select value={activeStage} onChange={(e) => setDwellStage(e.target.value)} title="Pipeline stage">
-                {dwellStages.map((s) => (
-                  <option key={s} value={s}>
-                    {stageLabel(s)}
-                  </option>
-                ))}
-              </select>
-            )}
-            <Segmented
-              size="sm"
-              options={[
-                { value: 'window', label: 'By stage' },
-                { value: 'trend', label: 'Trend' },
-              ]}
-              value={dwellMode}
-              onChange={setDwellMode}
+          <div className="flex items-center gap-2">
+            <div className="flex overflow-hidden rounded-md border border-line" title="Shift days counted as dwell">
+              {(['M', 'T', 'W', 'T', 'F', 'S', 'S'] as const).map((label, i) => (
+                <button
+                  key={i}
+                  onClick={() => toggleShiftDay(i + 1)}
+                  className={`px-1.5 py-0.5 text-[11px] font-medium ${
+                    shiftDays.includes(i + 1) ? 'bg-accent/15 text-accent' : 'bg-white text-faint hover:text-sub'
+                  } ${i > 0 ? 'border-l border-line' : ''}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <input
+              type="time"
+              value={shiftStart}
+              max={shiftEnd}
+              onChange={(e) => e.target.value && e.target.value < shiftEnd && setShiftStart(e.target.value)}
+              className="rounded-md border border-line px-1 py-0.5 text-[11.5px]"
+              title="Shift start (ET)"
             />
-          </>
+            <span className="text-[11px] text-faint">–</span>
+            <input
+              type="time"
+              value={shiftEnd}
+              min={shiftStart}
+              onChange={(e) => e.target.value && e.target.value > shiftStart && setShiftEnd(e.target.value)}
+              className="rounded-md border border-line px-1 py-0.5 text-[11.5px]"
+              title="Shift end (ET)"
+            />
+          </div>
         }
       >
         {dwellChart && <EChart ref={dwellRef} option={dwellChart.option} height={360} />}
         <Caption>
-          Channel / material / mfg-type filters apply. Build &amp; lot stages exist since Jul 2, 2026 (station-app
-          go-live); order stages go back further. Station-type filter doesn't apply here.
-          {dwellChart?.provisional ? ' Newest period is provisional.' : ''}
+          Only time inside the shift window counts as dwell (Printing stays wall-clock — printers run overnight).
+          Quarantine → processed includes lots still parked, at their current age. Channel / material / mfg-type
+          filters apply. Build &amp; lot stages exist since Jul 2, 2026 (station-app go-live); order stages go back
+          further. Station-type filter doesn't apply here.
         </Caption>
       </ChartCard>
     </div>

@@ -39,8 +39,8 @@ const CASES = [
   ['floor_station_throughput', { ...range, includeExcluded: false, stations: ['Finishing 1'] }],
   ['floor_sessions', { ...range, includeExcluded: false, stationTypes: ['FINISHING'] }],
   ['floor_sessions', { ...range, includeExcluded: false, stations: [] }],
-  ['pipeline_dwell', { ...range, mode: 'window' }],
-  ['pipeline_dwell', { ...range, mode: 'trend' }],
+  ['pipeline_dwell', range],
+  ['pipeline_dwell', { ...range, shiftDays: [1, 2, 3, 4, 5, 6], shiftStart: '06:00', shiftEnd: '18:00' }],
   ['floor_quality_exceptions', range],
   ['floor_quality_outcomes', range],
 ]
