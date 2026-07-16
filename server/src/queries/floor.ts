@@ -289,7 +289,10 @@ ORDER BY sess.started_at DESC`,
    * verified against real warehouse data (recon 2026-07-10):
    *   order: accepted → DFM approved → cleared (print queue) … ready → shipped
    *   build: queued → print start → print end → wash/sift scan → lot split
-   *   lot:   split → {finishing | bin/ship | quarantine} scan; quarantine → processed
+   *   lot:   split → {finishing | bin/ship | quarantine} scan
+   * "Quarantine → processed" was removed at owner request: pass/fail updates
+   * the MES-internal lot table without reliably emitting warehouse events, so
+   * quarantine dwell is unmeasurable until that table is synced to BigQuery.
    * Legacy traps deliberately avoided: started_processing_at (dead since Jun'26),
    * printbuild.status (sticky), zdobb wash start (dead), QC1/2 columns,
    * gpygu quarantine end (dead). Tulip↔build linkage uses the station-app bridge
@@ -303,7 +306,7 @@ ORDER BY sess.started_at DESC`,
    */
   pipeline_dwell: {
     description:
-      "Order→ship pipeline dwell: median SHIFT-HOURS per stage boundary — elapsed time clipped to the configured production shift (shiftDays ISO 1=Mon..7=Sun, shiftStart/shiftEnd ET; default Mon–Fri 07:30–16:00), so off-shift waiting is not counted. '04 Printing' is machine time and stays wall-clock. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED], DFM→cleared-for-production = print-queue entry, ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. Build stages (build queued [printbuild.created_at]→print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan→lot split) and lot tracks (split→finishing scan / bin-ship scan / quarantine scan; quarantine→processed) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. 'Quarantine → processed' = quarantine-line scan until the lot's next station event of any kind (incl. child-lot splits via parent_lot_guid); pass/fail scans are skipped for ~2/3 of routed lots (verified — most belong to shipped orders), so un-dispositioned lots count until their order shipped, or until now while the order is still open. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >720 shift-hours discarded. Cohort anchor = when the stage COMPLETED.",
+      "Order→ship pipeline dwell: median SHIFT-HOURS per stage boundary — elapsed time clipped to the configured production shift (shiftDays ISO 1=Mon..7=Sun, shiftStart/shiftEnd ET; default Mon–Fri 07:30–16:00), so off-shift waiting is not counted. '04 Printing' is machine time and stays wall-clock. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED], DFM→cleared-for-production = print-queue entry, ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. Build stages (build queued [printbuild.created_at]→print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan→lot split) and lot tracks (split→finishing scan / bin-ship scan / quarantine scan) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. There is deliberately NO quarantine→processed stage: pass/fail updates the MES-internal lot table without reliably emitting warehouse events (~2/3 of routed lots have no recorded disposition, most on since-shipped orders), so quarantine dwell is unmeasurable until that table is synced to BigQuery. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >720 shift-hours discarded. Cohort anchor = when the stage COMPLETED.",
     source:
       'fcm_api_order/orderpart/orderevent/printbuild(+parts) + manufacturing_events (station app) + formcloud_manufacturing.master_table (Tulip)',
     params: zBaseFilters.extend({
@@ -403,7 +406,7 @@ bsplit AS (
   GROUP BY e.print_build_id
 ),
 lots AS (
-  SELECT e.lot_guid, ANY_VALUE(e.order_id) AS order_id, MIN(e.timestamp) AS split_ts
+  SELECT e.lot_guid, MIN(e.timestamp) AS split_ts
   FROM ${T.mfgEvent} e
   JOIN ${T.orderPart} op ON op.guid = e.order_part_id
   WHERE e.source = 'STATION_APP' AND e.event_type = 'LOT_SPLIT'
@@ -416,27 +419,6 @@ scans AS (
   WHERE source = 'STATION_APP'
     AND event_type IN ('Pending Finishing', 'Pending Binning', 'Quarantine - Routing')
   GROUP BY lot_guid, event_type
-),
-qdisp AS (
-  -- Processed = the lot's next station event of ANY type after the quarantine
-  -- scan (incl. being split into a child lot, matched via parent_lot_guid).
-  -- ~2/3 of routed lots never get their pass/fail scanned (verified: most such
-  -- lots belong to SHIPPED orders), so lots with no recorded disposition count
-  -- until their order shipped — the latest they could have been processed —
-  -- or until now (COALESCE downstream) only while the order is still open.
-  SELECT s.lot_guid, s.ts AS routed_at, COALESCE(MIN(nxt.ts2), f.shipped_at) AS disp_at
-  FROM scans s
-  JOIN lots l ON l.lot_guid = s.lot_guid
-  JOIN flt f ON f.id = l.order_id
-  LEFT JOIN (
-    SELECT lot_guid AS lg, timestamp AS ts2 FROM ${T.mfgEvent}
-    WHERE source = 'STATION_APP' AND event_type NOT IN ('Quarantine - Routing', 'SIGN_IN', 'SIGN_OUT')
-    UNION ALL
-    SELECT JSON_VALUE(payload, '$.parent_lot_guid'), timestamp FROM ${T.mfgEvent}
-    WHERE source = 'STATION_APP' AND event_type = 'LOT_SPLIT'
-  ) nxt ON nxt.lg = s.lot_guid AND nxt.ts2 > s.ts
-  WHERE s.event_type = 'Quarantine - Routing'
-  GROUP BY s.lot_guid, s.ts, f.shipped_at
 ),
 intervals AS (
   SELECT '01 Accepted → DFM approved' AS stage, DATE(d.dfm_done) AS anchor,
@@ -476,11 +458,6 @@ intervals AS (
          ${sh('l.split_ts', 's.ts')}
   FROM lots l JOIN scans s ON s.lot_guid = l.lot_guid AND s.event_type = 'Quarantine - Routing'
   UNION ALL
-  -- Still-parked lots count at their current age (lower bound), anchored today.
-  SELECT '10 Quarantine → processed', DATE(COALESCE(q.disp_at, CURRENT_TIMESTAMP())),
-         ${sh('q.routed_at', 'COALESCE(q.disp_at, CURRENT_TIMESTAMP())')}
-  FROM qdisp q
-  UNION ALL
   SELECT '11 Ready to ship → shipped', DATE(f.shipped_at),
          ${sh('r.ready_at', 'f.shipped_at')}
   FROM flt f JOIN ready r ON r.order_id = f.id
@@ -505,7 +482,6 @@ FROM d GROUP BY stage ORDER BY stage`
         ['07 Lot split → finishing scan', 3],
         ['08 Lot split → bin/ship scan', 2],
         ['09 Lot split → quarantine scan', 4],
-        ['10 Quarantine → processed', 30],
         ['11 Ready to ship → shipped', 1],
       ]
       const r = rng(`pipe:${p.grain}:${p.shiftStart}${p.shiftEnd}${p.shiftDays.join('')}`)
