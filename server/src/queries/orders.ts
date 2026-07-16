@@ -372,7 +372,7 @@ LIMIT 200`,
   /** C6 — severity-ranked triage board of open orders. */
   problem_orders: {
     description:
-      "Every open production order (ACCEPTED / PRINTING / ON_HOLD), oldest governed due date first. Per order: customer email + lifetime stats (order count and LTV = sum of bookings across the customer's non-cancelled orders, matched on email), materials, lagging production stage (earliest pipeline stage with outstanding work: no build yet → printing → wash/lot split → post-processing → quarantine → ready to ship; build/lot signals exist since station-app go-live 2026-07-02 and Fuse X1 prints are unlogged in Tulip, so those orders can read as 'Printing'), parts_ready (MES-style ready-to-ship: per line item, parts in station lots whose latest event is Binned — scanned onto the fulfillment's consolidation shelf — capped at the ordered quantity, plus parts on lines MES's ORDER_PARTS_NOT_PROGRESSING watchdog once flagged but no longer does, which proves they progressed inside MES-only lots the station apps never logged; still a floor — smooth flow through unlogged lots stays invisible until the MES lot table is synced to BigQuery) vs parts_total (ordered part quantity), parts_manual_queue (part quantity in print builds still PENDING that never fired an ORDER_PRINTING event — builds needing manual re-queueing), and yield components (parts_printed = build part quantity on builds with a Tulip print-complete; parts_alive = parts_printed minus observed lot scrap (Tulip original-minus-current quantity) minus parts in lots currently parked in quarantine — printed parts not yet scanned into a lot are presumed alive, so pre-wash losses are not yet visible). days_overdue vs the governed due date; issue events = build failure / reprint / quarantine / mfg issue in 30d. The global date range does not apply — this is live WIP.",
+      "Every open production order (ACCEPTED / PRINTING / ON_HOLD), oldest governed due date first. Per order: customer email + lifetime stats (order count and LTV = sum of bookings across the customer's non-cancelled orders, matched on email), materials, lagging production stage (earliest pipeline stage with outstanding work: no build yet → printing → wash/lot split → post-processing → quarantine → ready to ship; build/lot signals exist since station-app go-live 2026-07-02 and Fuse X1 prints are unlogged in Tulip, so those orders can read as 'Printing'), parts_ready (MES-style ready-to-ship: per line item, parts in station lots whose latest event is Binned — scanned onto the fulfillment's consolidation shelf — capped at the ordered quantity, plus parts on lines MES's ORDER_PARTS_NOT_PROGRESSING watchdog once flagged but no longer does, which proves they progressed inside MES-only lots the station apps never logged; still a floor — smooth flow through unlogged lots stays invisible until the MES lot table is synced to BigQuery) vs parts_total (ordered part quantity), parts_manual_queue (part quantity in print builds still PENDING that never fired an ORDER_PRINTING event — builds needing manual re-queueing), and yield components (parts_printed = the larger of the lot ledger's part count and build-record part quantity on builds with a Tulip print-complete — build records are reused across print runs, so their plate quantities can undercount physical prints by >10x on big orders; parts_alive = parts_printed minus observed lot scrap (Tulip original-minus-current quantity) minus parts in lots currently parked in quarantine — printed parts not yet scanned into a lot are presumed alive, so pre-wash losses are not yet visible). days_overdue vs the governed due date; issue events = build failure / reprint / quarantine / mfg issue in 30d. The global date range does not apply — this is live WIP.",
     source:
       'fcm_api_order/orderevent/orderpart/printbuild(+parts) + medusa order (email) + manufacturing_events + formcloud_manufacturing.master_table (Tulip)',
     maxAge: 300,
@@ -513,6 +513,14 @@ line_lot AS (
   FROM lot_state
   GROUP BY 1, 2
 ),
+lot_tot AS (
+  -- Physical parts that entered lots. Build records are reused across print
+  -- runs (printbuildpart.quantity reflects one plate layout, not total
+  -- prints), so for lot-tracked orders this is the true printed count.
+  SELECT order_id, CAST(SUM(last.part_quantity) AS INT64) AS parts_lotted
+  FROM lot_state
+  GROUP BY order_id
+),
 np_lines AS (
   -- MES's stuck-parts watchdog names line items in older flags but not the
   -- latest one => those parts progressed inside MES-only lots that the
@@ -568,8 +576,13 @@ SELECT
     WHEN lg.lots_quar > 0 THEN 'Quarantine'
     ELSE 'Ready to ship'
   END AS lagging_stage,
-  GREATEST(IFNULL(bg.parts_printed, 0) - IFNULL(lg.parts_scrapped, 0) - IFNULL(lg.parts_quarantined, 0), 0) AS parts_alive,
-  IFNULL(bg.parts_printed, 0) AS parts_printed,
+  -- Printed = MAX(lot ledger, build records): builds get reused across print
+  -- runs so their part counts can undercount by >10x; the lot ledger can
+  -- undercount early orders whose printed parts aren't lotted yet.
+  GREATEST(
+    GREATEST(IFNULL(lt.parts_lotted, 0), IFNULL(bg.parts_printed, 0))
+      - IFNULL(lg.parts_scrapped, 0) - IFNULL(lg.parts_quarantined, 0), 0) AS parts_alive,
+  GREATEST(IFNULL(lt.parts_lotted, 0), IFNULL(bg.parts_printed, 0)) AS parts_printed,
   IFNULL(rd.parts_ready, 0) AS parts_ready,
   IFNULL(m.parts_total, 0) AS parts_total,
   IFNULL(bg.parts_manual_queue, 0) AS parts_manual_queue
@@ -581,6 +594,7 @@ LEFT JOIN matdet md ON md.order_id = c.id
 LEFT JOIN cust cu ON cu.email = LOWER(c.medusa_email)
 LEFT JOIN bagg bg ON bg.order_id = c.id
 LEFT JOIN lagg lg ON lg.order_id = c.id
+LEFT JOIN lot_tot lt ON lt.order_id = c.id
 LEFT JOIN ready rd ON rd.order_id = c.id
 WHERE TRUE ${classifiedChannelFilter(p.channels, 'c')}
 ORDER BY ${governedDueDateExpr('c')} ASC NULLS LAST, days_overdue DESC
