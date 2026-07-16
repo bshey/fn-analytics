@@ -62,11 +62,6 @@ export function Layout() {
           ))}
         </nav>
         <div className="mt-auto space-y-1 px-4 pb-4 text-[11px] text-faint">
-          {health.data?.mock && (
-            <div className="rounded-md border border-warn/30 bg-amber-50 px-2 py-1 font-medium text-warn">
-              Mock data mode
-            </div>
-          )}
           {health.data && !health.data.mock && !health.data.hasApiKey && (
             <div className="rounded-md border border-bad/30 bg-red-50 px-2 py-1 text-bad">
               REDASH_API_KEY not set — see .env.example
@@ -80,6 +75,12 @@ export function Layout() {
 
       <div className="ml-52 flex min-w-0 flex-1 flex-col">
         <div className="sticky top-0 z-10">
+          {health.data?.mock && (
+            <div className="bg-amber-400 px-5 py-1.5 text-center text-[12.5px] font-semibold text-black">
+              DEMO DATA — server is running in mock mode (MOCK=1); every number on every page is synthetic.
+              Restart with <code className="rounded bg-black/10 px-1">npm start</code> for live data.
+            </div>
+          )}
           <FilterBar />
         </div>
         <main className="mx-auto w-full max-w-[1440px] flex-1 px-5 py-4">
