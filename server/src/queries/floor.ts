@@ -289,10 +289,13 @@ ORDER BY sess.started_at DESC`,
    * verified against real warehouse data (recon 2026-07-10):
    *   order: accepted → DFM approved → cleared (print queue) … ready → shipped
    *   build: queued → print start → print end → wash/sift scan → lot split
-   *   lot:   split → {finishing | bin/ship | quarantine} scan
-   * "Quarantine → processed" was removed at owner request: pass/fail updates
-   * the MES-internal lot table without reliably emitting warehouse events, so
-   * quarantine dwell is unmeasurable until that table is synced to BigQuery.
+   *   lot:   split → {finishing | bin/ship} scan; finishing scan → binned;
+   *          quarantine line dwell = split → first Quarantine-Routing scan
+   *          (that scan fires at pass/fail pickup, not at placement — verified
+   *          by station: 383 quarantine-app + 349 shipping-app vs 0 post-proc).
+   * A quarantine-scan → disposition stage is NOT offered: pass/fail outcomes
+   * update the MES-internal lot table without reliably emitting warehouse
+   * events, so only the pickup moment is trustworthy.
    * Legacy traps deliberately avoided: started_processing_at (dead since Jun'26),
    * printbuild.status (sticky), zdobb wash start (dead), QC1/2 columns,
    * gpygu quarantine end (dead). Tulip↔build linkage uses the station-app bridge
@@ -306,7 +309,7 @@ ORDER BY sess.started_at DESC`,
    */
   pipeline_dwell: {
     description:
-      "Order→ship pipeline dwell: median SHIFT-HOURS per stage boundary — elapsed time clipped to the configured production shift (shiftDays ISO 1=Mon..7=Sun, shiftStart/shiftEnd ET; default Mon–Fri 07:30–16:00), so off-shift waiting is not counted. '04 Printing' is machine time and stays wall-clock. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED], DFM→cleared-for-production = print-queue entry, ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. Build stages (build queued [printbuild.created_at]→print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan→lot split) and lot tracks (split→finishing scan / bin-ship scan / quarantine scan) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. There is deliberately NO quarantine→processed stage: pass/fail updates the MES-internal lot table without reliably emitting warehouse events (~2/3 of routed lots have no recorded disposition, most on since-shipped orders), so quarantine dwell is unmeasurable until that table is synced to BigQuery. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >720 shift-hours discarded. Cohort anchor = when the stage COMPLETED.",
+      "Order→ship pipeline dwell: median SHIFT-HOURS per stage boundary — elapsed time clipped to the configured production shift (shiftDays ISO 1=Mon..7=Sun, shiftStart/shiftEnd ET; default Mon–Fri 07:30–16:00), so off-shift waiting is not counted. '04 Printing' is machine time and stays wall-clock. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED], DFM→cleared-for-production = print-queue entry, ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. Build stages (build queued [printbuild.created_at]→print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan→lot split) and lot tracks (split→finishing scan; finishing scan→binned = time on the finishing line; split→bin-ship scan; quarantine line dwell = split→first Quarantine-Routing scan, which fires when the lot is picked up for pass/fail at the quarantine/shipping station — verified almost never at post-processing — so with placement happening at split like the other tracks, this measures time waiting on the quarantine line) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. Post-pickup disposition timing is deliberately NOT shown: pass/fail outcomes update the MES-internal lot table without reliably emitting warehouse events. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >720 shift-hours discarded. Cohort anchor = when the stage COMPLETED.",
     source:
       'fcm_api_order/orderpart/orderevent/printbuild(+parts) + manufacturing_events (station app) + formcloud_manufacturing.master_table (Tulip)',
     params: zBaseFilters.extend({
@@ -417,7 +420,7 @@ scans AS (
   SELECT lot_guid, event_type, MIN(timestamp) AS ts
   FROM ${T.mfgEvent}
   WHERE source = 'STATION_APP'
-    AND event_type IN ('Pending Finishing', 'Pending Binning', 'Quarantine - Routing')
+    AND event_type IN ('Pending Finishing', 'Pending Binning', 'Quarantine - Routing', 'Binned')
   GROUP BY lot_guid, event_type
 ),
 intervals AS (
@@ -450,11 +453,23 @@ intervals AS (
          ${sh('l.split_ts', 's.ts')}
   FROM lots l JOIN scans s ON s.lot_guid = l.lot_guid AND s.event_type = 'Pending Finishing'
   UNION ALL
-  SELECT '08 Lot split → bin/ship scan', DATE(s.ts),
+  -- Time on the finishing line: scanned on at split, sits, gets finished, binned.
+  SELECT '08 Finishing scan → binned', DATE(sb.ts),
+         ${sh('sf.ts', 'sb.ts')}
+  FROM lots l
+  JOIN scans sf ON sf.lot_guid = l.lot_guid AND sf.event_type = 'Pending Finishing'
+  JOIN scans sb ON sb.lot_guid = l.lot_guid AND sb.event_type = 'Binned'
+  UNION ALL
+  SELECT '09 Lot split → bin/ship scan', DATE(s.ts),
          ${sh('l.split_ts', 's.ts')}
   FROM lots l JOIN scans s ON s.lot_guid = l.lot_guid AND s.event_type = 'Pending Binning'
   UNION ALL
-  SELECT '09 Lot split → quarantine scan', DATE(s.ts),
+  -- The Quarantine - Routing event fires at the quarantine/shipping station
+  -- when the lot is picked up for pass/fail — almost never at post-processing
+  -- (verified: 383 quarantine-app + 349 shipping-app vs 0 post-processing).
+  -- Placement on the quarantine line happens at split like the other tracks,
+  -- so split → this scan ≈ time the lot waited on the quarantine line.
+  SELECT '10 Quarantine line dwell (split → processed)', DATE(s.ts),
          ${sh('l.split_ts', 's.ts')}
   FROM lots l JOIN scans s ON s.lot_guid = l.lot_guid AND s.event_type = 'Quarantine - Routing'
   UNION ALL
@@ -480,8 +495,9 @@ FROM d GROUP BY stage ORDER BY stage`
         ['05 Print end → wash/sift scan', 8],
         ['06 Wash scan → lot split', 12],
         ['07 Lot split → finishing scan', 3],
-        ['08 Lot split → bin/ship scan', 2],
-        ['09 Lot split → quarantine scan', 4],
+        ['08 Finishing scan → binned', 6],
+        ['09 Lot split → bin/ship scan', 2],
+        ['10 Quarantine line dwell (split → processed)', 4],
         ['11 Ready to ship → shipped', 1],
       ]
       const r = rng(`pipe:${p.grain}:${p.shiftStart}${p.shiftEnd}${p.shiftDays.join('')}`)
@@ -489,7 +505,7 @@ FROM d GROUP BY stage ORDER BY stage`
       const shiftFactor = Math.min(1, (p.shiftDays.length / 5) * 0.9 + 0.1)
       return STAGES.map(([stage, base]) => ({
         stage,
-        n: Math.max(5, Math.round((250 + r() * 200) * (stage.startsWith('09') || stage.startsWith('10') ? 0.25 : 1))),
+        n: Math.max(5, Math.round((250 + r() * 200) * (stage.startsWith('10') ? 0.25 : 1))),
         median_hours: Math.round(base * shiftFactor * (0.8 + r() * 0.5) * 100) / 100,
       }))
     },
