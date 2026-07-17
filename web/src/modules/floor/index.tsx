@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import type { ColumnDef } from '@tanstack/react-table'
 import { useFilters } from '../../lib/filters'
-import { useAppConfig, useNamedQuery, type Row } from '../../lib/api'
+import { useAppConfig, useFormlabsPanel, useNamedQuery, type Row } from '../../lib/api'
 import { ChartCard } from '../../components/ChartCard'
 import { KpiCard } from '../../components/KpiCard'
 import { DataTable } from '../../components/DataTable'
@@ -183,6 +183,7 @@ function StationsSection({ since, stationTypes }: { since: string; stationTypes:
     setShiftDays((cur) => (cur.includes(d) ? (cur.length > 1 ? cur.filter((x) => x !== d) : cur) : [...cur, d].sort()))
 
   return (
+    <>
     <div className="grid gap-4 xl:grid-cols-2">
       <ChartCard
         title="Parts processed per period"
@@ -285,6 +286,89 @@ function StationsSection({ since, stationTypes }: { since: string; stationTypes:
           warehouse (see ⓘ). Channel / material / mfg-type
           filters apply. Build &amp; lot stages exist since Jul 2, 2026 (station-app go-live); order stages go back
           further. Station-type filter doesn't apply here.
+        </Caption>
+      </ChartCard>
+    </div>
+    <PrinterQueuesSection />
+    </>
+  )
+}
+
+// ================= D1b · Printer queues (Formlabs Dashboard API) ============
+
+function PrinterQueuesSection() {
+  const queues = useFormlabsPanel('printer_queues', 2 * 60_000)
+  const waits = useFormlabsPanel('printer_queue_waits', 30 * 60_000)
+  const qRows = queues.data?.rows ?? []
+  const wRows = waits.data?.rows ?? []
+  const totalJobs = qRows.reduce((t, r) => t + num0(r.jobs), 0)
+
+  const hrs = (v: unknown) => `${fmtNum(num0(v), 1)} h`
+  const queueCols: ColumnDef<Row, unknown>[] = [
+    { header: 'Printer group', accessorKey: 'group' },
+    { header: 'Jobs waiting', id: 'jobs', accessorFn: (r) => num0(r.jobs), cell: ({ row }) => fmtInt(num0(row.original.jobs)), meta: { align: 'right' } },
+    { header: 'Median age', id: 'median_age_h', accessorFn: (r) => num0(r.median_age_h), cell: ({ row }) => hrs(row.original.median_age_h), meta: { align: 'right' } },
+    { header: 'p90 age', id: 'p90_age_h', accessorFn: (r) => num0(r.p90_age_h), cell: ({ row }) => hrs(row.original.p90_age_h), meta: { align: 'right' } },
+    { header: 'Oldest', id: 'oldest_age_h', accessorFn: (r) => num0(r.oldest_age_h), cell: ({ row }) => hrs(row.original.oldest_age_h), meta: { align: 'right' } },
+    { header: 'Est. print time', id: 'est_print_hours', accessorFn: (r) => num0(r.est_print_hours), cell: ({ row }) => hrs(row.original.est_print_hours), meta: { align: 'right' } },
+  ]
+  const waitCols: ColumnDef<Row, unknown>[] = [
+    { header: 'Printer group', accessorKey: 'group' },
+    { header: 'Prints', id: 'prints', accessorFn: (r) => num0(r.prints), cell: ({ row }) => fmtInt(num0(row.original.prints)), meta: { align: 'right' } },
+    { header: 'p25', id: 'p25_h', accessorFn: (r) => num0(r.p25_h), cell: ({ row }) => hrs(row.original.p25_h), meta: { align: 'right' } },
+    { header: 'Median wait', id: 'median_h', accessorFn: (r) => num0(r.median_h), cell: ({ row }) => hrs(row.original.median_h), meta: { align: 'right' } },
+    { header: 'p75', id: 'p75_h', accessorFn: (r) => num0(r.p75_h), cell: ({ row }) => hrs(row.original.p75_h), meta: { align: 'right' } },
+    { header: 'p90', id: 'p90_h', accessorFn: (r) => num0(r.p90_h), cell: ({ row }) => hrs(row.original.p90_h), meta: { align: 'right' } },
+    { header: 'Since', accessorKey: 'oldest_start' },
+  ]
+
+  return (
+    <div className="mt-4 grid gap-4 xl:grid-cols-2">
+      <ChartCard
+        title={`Printer queues — live${totalJobs ? ` (${fmtInt(totalJobs)} jobs)` : ''}`}
+        subtitle="Cloud print queue per printer group, right now"
+        info={{
+          definition:
+            'Jobs currently waiting in each printer group\'s cloud queue (Formlabs Dashboard API /groups/{id}/queue/), with age since queue submission in wall-clock hours and the queue\'s total estimated print time. This is the survivorship-free view of "build queued → print start": the pipeline-dwell bar can only measure prints that already started, while these jobs are still waiting. Queue items disappear once their print starts. The global date range and floor filters do not apply — this is a live snapshot.',
+          source: 'Formlabs Dashboard API (api.formlabs.com) — read-only',
+        }}
+        csvRows={qRows}
+        csvName="printer-queues"
+        isLoading={queues.isLoading}
+        isFetching={queues.isFetching}
+        error={queues.error}
+        isEmpty={!qRows.length}
+        emptyText="All printer queues are empty."
+        height={260}
+      >
+        <DataTable data={qRows} columns={queueCols} initialSort={[{ id: 'jobs', desc: true }]} csvName="printer-queues" fit />
+        <Caption>
+          Live snapshot (cached ~3 min) · wall-clock hours · date range &amp; filters don't apply.
+          {queues.data ? ` As of ${fmtDateTime(queues.data.meta.retrievedAt)}.` : ''}
+        </Caption>
+      </ChartCard>
+
+      <ChartCard
+        title="Print queue wait — recent prints"
+        subtitle="Queue submission → print start, per physical print (wall-clock)"
+        info={{
+          definition:
+            'For each printer\'s ~50 most recent prints (Formlabs Dashboard API), the wall-clock hours from print_intent.created_at (the moment the job entered the cloud queue — verified to equal fcm build creation within ~2s) to print_started_at, per physical print run. This is the API-accurate version of the pipeline chart\'s "Build queued → print start": it sees every run of reused build records and is not clipped to shift hours (printers run around the clock). REMOTE-initiated prints are excluded. Sample depth is the most recent page per printer, so the "Since" column shows how far back each group\'s sample reaches. The global date range and floor filters do not apply.',
+          source: 'Formlabs Dashboard API (api.formlabs.com) — read-only',
+        }}
+        csvRows={wRows}
+        csvName="printer-queue-waits"
+        isLoading={waits.isLoading}
+        isFetching={waits.isFetching}
+        error={waits.error}
+        isEmpty={!wRows.length}
+        emptyText="No recent prints with queue timestamps."
+        height={260}
+      >
+        <DataTable data={wRows} columns={waitCols} initialSort={[{ id: 'prints', desc: true }]} csvName="printer-queue-waits" fit />
+        <Caption>
+          Most recent ~50 prints per printer (cached ~30 min) · wall-clock hours, not shift-clipped.
+          {waits.data ? ` As of ${fmtDateTime(waits.data.meta.retrievedAt)}.` : ''}
         </Caption>
       </ChartCard>
     </div>

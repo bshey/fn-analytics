@@ -8,6 +8,14 @@ import { registry } from './queries/index.js'
 import { mapMaterialRows } from './queries/dims.js'
 import type { Row } from './registry.js'
 import { CHANNELS, MFG_TYPES } from './sql.js'
+import {
+  FormlabsError,
+  fetchPrinterQueues,
+  fetchQueueWaits,
+  hasFormlabsCreds,
+  mockPrinterQueues,
+  mockQueueWaits,
+} from './formlabs.js'
 
 export const app = express()
 app.use(express.json({ limit: '1mb' }))
@@ -107,6 +115,55 @@ app.post('/api/query/:name', async (req, res) => {
     handleError(res, e)
   }
 })
+
+/**
+ * Formlabs Dashboard API panels (not Redash-backed): live printer queues and
+ * per-print queue waits. Cached in-process; ?refresh=1 bypasses.
+ */
+function formlabsRoute(name: string, ttlSeconds: number, live: () => Promise<Row[]>, mock: () => Row[]): express.RequestHandler {
+  return async (req, res) => {
+    try {
+      const meta = {
+        name,
+        source: 'Formlabs Dashboard API (api.formlabs.com)',
+        description: '',
+        cached: false,
+        retrievedAt: new Date().toISOString(),
+      }
+      if (config.mock) {
+        res.json({ rows: mock(), meta: { ...meta, mock: true } })
+        return
+      }
+      if (!hasFormlabsCreds()) {
+        res.status(503).json({
+          error: 'Formlabs Dashboard API credentials not configured',
+          hint: 'Set FORMLABS_API_CLIENT_ID and FORMLABS_API_TOKEN (OAuth client secret) in .env.',
+        })
+        return
+      }
+      const key = `formlabs:${name}`
+      if (req.query.refresh !== '1') {
+        const hit = cacheGet<{ rows: Row[]; retrievedAt: string }>(key)
+        if (hit) {
+          res.json({ rows: hit.rows, meta: { ...meta, mock: false, cached: true, retrievedAt: hit.retrievedAt } })
+          return
+        }
+      }
+      const rows = await live()
+      cacheSet(key, { rows, retrievedAt: meta.retrievedAt }, ttlSeconds)
+      res.json({ rows, meta: { ...meta, mock: false } })
+    } catch (e) {
+      if (e instanceof FormlabsError) {
+        res.status(e.status).json({ error: e.message, hint: e.hint })
+        return
+      }
+      handleError(res, e)
+    }
+  }
+}
+
+app.get('/api/printer_queues', formlabsRoute('printer_queues', 180, fetchPrinterQueues, mockPrinterQueues))
+app.get('/api/printer_queue_waits', formlabsRoute('printer_queue_waits', 1800, fetchQueueWaits, mockQueueWaits))
 
 function handleError(res: express.Response, e: unknown): void {
   if (e instanceof RedashError) {

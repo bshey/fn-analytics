@@ -45,8 +45,23 @@ const CASES = [
   ['floor_quality_outcomes', range],
 ]
 
+// Formlabs Dashboard API panels — GET endpoints outside the query registry.
+const GET_CASES = ['printer_queues', 'printer_queue_waits']
+
 let failures = 0
 const results = []
+for (const name of GET_CASES) {
+  try {
+    const res = await fetch(`${BASE}/api/${name}`)
+    const body = await res.json()
+    const ok = res.ok && Array.isArray(body.rows)
+    if (!ok) failures++
+    results.push({ query: `GET ${name}`, status: res.status, rows: Array.isArray(body.rows) ? body.rows.length : `✗ ${body.error ?? '?'}` })
+  } catch (e) {
+    failures++
+    results.push({ query: `GET ${name}`, status: 'ERR', rows: e.message })
+  }
+}
 for (const [name, params] of CASES) {
   try {
     const res = await fetch(`${BASE}/api/query/${name}`, {

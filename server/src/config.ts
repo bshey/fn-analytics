@@ -14,6 +14,9 @@ export const config = {
   dataSourceId: Number(process.env.REDASH_DATA_SOURCE_ID ?? 13),
   cfClientId: process.env.CF_ACCESS_CLIENT_ID,
   cfClientSecret: process.env.CF_ACCESS_CLIENT_SECRET,
+  // Formlabs Dashboard API (OAuth client credentials; FORMLABS_API_TOKEN is the client SECRET).
+  formlabsClientId: process.env.FORMLABS_API_CLIENT_ID ?? '',
+  formlabsClientSecret: process.env.FORMLABS_API_TOKEN ?? '',
   port: Number(process.env.PORT ?? 4600),
   mock: process.env.MOCK === '1',
   isProd: process.env.NODE_ENV === 'production',

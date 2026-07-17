@@ -49,6 +49,24 @@ export function useNamedQuery(
   }) as UseQueryResult<QueryPayload, Error & { hint?: string }>
 }
 
+/** Formlabs Dashboard API panels — same {rows, meta} envelope as named queries. */
+export function useFormlabsPanel(
+  name: 'printer_queues' | 'printer_queue_waits',
+  staleMs: number,
+): UseQueryResult<QueryPayload, Error & { hint?: string }> {
+  return useQuery({
+    queryKey: ['formlabs', name],
+    queryFn: async () => {
+      const res = await fetch(`/api/${name}${Date.now() < forceRefreshUntil ? '?refresh=1' : ''}`)
+      const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+      if (!res.ok) throw Object.assign(new Error(body.error ?? `HTTP ${res.status}`), { hint: body.hint }) as Error & { hint?: string }
+      return body as QueryPayload
+    },
+    staleTime: staleMs,
+    retry: 1,
+  }) as UseQueryResult<QueryPayload, Error & { hint?: string }>
+}
+
 export interface Dims {
   channels: string[]
   mfgTypes: string[]
