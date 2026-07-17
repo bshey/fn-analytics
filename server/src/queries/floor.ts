@@ -309,7 +309,7 @@ ORDER BY sess.started_at DESC`,
    */
   pipeline_dwell: {
     description:
-      "Order→ship pipeline dwell: median SHIFT-HOURS per stage boundary — elapsed time clipped to the configured production shift (shiftDays ISO 1=Mon..7=Sun, shiftStart/shiftEnd ET; default Mon–Fri 07:30–16:00), so off-shift waiting is not counted. '04 Printing' is machine time and stays wall-clock. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED]; ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. '02 Cleared → part in a build' is the parts-needing-builds queue at LINE-ITEM grain: from ORDER_CLEARED_FOR_PRODUCTION (fires ~3s after final DFM approval — the old DFM→cleared stage read 0 by construction) until the part's first printbuildpart row; the >7-day tail is dominated by ON_HOLD orders, and parts still waiting for a build are not counted (119 such parts on open orders at last check). '03 Build queued → print start' = printbuild.created_at (verified == cloud print-queue submission within ~2s of the Formlabs API) to EVERY physical print start bridged to that build guid — build guids are reused across 2-43 runs, so each run is an interval; builds still waiting in the fleet queue are invisible (survivorship), so the median understates queue pain — the Formlabs Dashboard API measures true per-print queue wait at ~11h wall-clock median / 100h p90. Build stages (print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan; sift→blast scan [SLS only — blast-finished is unrecorded so blast START is the anchor]; wash/blast→lot split [SLA anchors on wash end, SLS on blast start]) and lot tracks (split→finishing line; finishing line scan→binned; the no-finishing track split into split→binning line scan and binning line scan→binned, restricted to lots with no finishing scan; quarantine line dwell = split→first Quarantine-Routing scan, which fires when the lot is picked up for pass/fail at the quarantine/shipping station — verified almost never at post-processing — so with placement happening at split like the other tracks, this measures time waiting on the quarantine line) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. Post-pickup disposition timing is deliberately NOT shown: pass/fail outcomes update the MES-internal lot table without reliably emitting warehouse events. The family param (all/sla/sls) filters lot/build stages exactly by part manufacturing type and order stages by any-part. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >720 shift-hours discarded. Cohort anchor = when the stage COMPLETED.",
+      "Order→ship pipeline dwell: median SHIFT-HOURS per stage boundary — elapsed time clipped to the configured production shift (shiftDays ISO 1=Mon..7=Sun, shiftStart/shiftEnd ET; default Mon–Fri 07:30–16:00), so off-shift waiting is not counted. '04 Printing (total time)' is machine time: TOTAL wall-clock hours per physical print run (never shift-clipped), paired start→end within the same run — build guids are reused across runs, so per-guid MIN/MAX pairing would read impossibly long. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED]; ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. '02 Cleared → part in a build' is the parts-needing-builds queue at LINE-ITEM grain: from ORDER_CLEARED_FOR_PRODUCTION (fires ~3s after final DFM approval — the old DFM→cleared stage read 0 by construction) until the part's first printbuildpart row; the >7-day tail is dominated by ON_HOLD orders, and parts still waiting for a build are not counted (119 such parts on open orders at last check). '03 Build queued → print start' = printbuild.created_at (verified == cloud print-queue submission within ~2s of the Formlabs API) to EVERY physical print start bridged to that build guid — build guids are reused across 2-43 runs, so each run is an interval; builds still waiting in the fleet queue are invisible (survivorship), so the median understates queue pain — the Formlabs Dashboard API measures true per-print queue wait at ~11h wall-clock median / 100h p90. Build stages (print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan; sift→blast scan [SLS only, paired within the same run — lots with no blast scan are EXCLUDED since blast scanning is inconsistent, and blast-finished is unrecorded so blast START is the anchor]; wash/blast→lot split [per lot: SLA anchors on wash end, SLS on blast start, falling back to sift when the blast scan was skipped]) and lot tracks (split→finishing line; finishing line scan→binned; binning line scan→binned for the no-finishing track, restricted to lots with no finishing scan [the split→binning-line-scan gap is always ~0 and is not shown]; quarantine line dwell = split→first Quarantine-Routing scan, which fires when the lot is picked up for pass/fail at the quarantine/shipping station — verified almost never at post-processing — so with placement happening at split like the other tracks, this measures time waiting on the quarantine line) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. Post-pickup disposition timing is deliberately NOT shown: pass/fail outcomes update the MES-internal lot table without reliably emitting warehouse events. The family param (all/sla/sls) filters lot/build stages exactly by part manufacturing type and order stages by any-part. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >720 shift-hours discarded. Cohort anchor = when the stage COMPLETED.",
     source:
       'fcm_api_order/orderpart/orderevent/printbuild(+parts) + manufacturing_events (station app) + formcloud_manufacturing.master_table (Tulip)',
     params: zBaseFilters.extend({
@@ -407,17 +407,14 @@ tulip AS (
   WHERE m._createdAt >= TIMESTAMP(DATE_SUB(${sqlDate(p.start)}, INTERVAL 60 DAY))
   GROUP BY m.nphse_guid
 ),
-bstage AS (
-  SELECT b.guid, b.created_at,
-         MIN(t.print_start) AS print_start,
-         MAX(t.print_end) AS print_end,
-         MIN(t.wash_at) AS wash_at,
-         MIN(t.sift_at) AS sift_at,
-         MIN(t.blast_at) AS blast_at
-  FROM builds b
-  JOIN bridge br ON br.print_build_id = b.guid
+brun AS (
+  -- One row per physical run × timestamp pair, deduped across the lots that
+  -- share a run. Build guids are reused across runs, so MIN/MAX aggregation
+  -- per guid pairs run 1's start with run N's end and reads impossibly long.
+  SELECT DISTINCT br.print_build_id AS guid, t.print_start, t.print_end, t.wash_at, t.sift_at, t.blast_at
+  FROM bridge br
   JOIN tulip t ON t.lot_guid = br.lot_guid
-  GROUP BY b.guid, b.created_at
+  WHERE br.print_build_id IN (SELECT guid FROM builds)
 ),
 runs AS (
   -- Every PHYSICAL print run of a build: build guids are reused (44% of
@@ -444,12 +441,6 @@ partsq AS (
     AND op.dfm_review_status IN ('PASSED', 'AT_RISK_APPROVED')
     ${partFilter}
   GROUP BY op.guid
-),
-bsplit AS (
-  SELECT e.print_build_id, MIN(e.timestamp) AS split_at
-  FROM ${T.mfgEvent} e
-  WHERE e.source = 'STATION_APP' AND e.event_type = 'LOT_SPLIT'
-  GROUP BY e.print_build_id
 ),
 lots AS (
   SELECT e.lot_guid, MIN(e.timestamp) AS split_ts
@@ -484,25 +475,32 @@ intervals AS (
          ${sh('r.created_at', 'r.print_start')}
   FROM runs r
   UNION ALL
-  -- Printing is machine time: printers run overnight, so wall-clock, not shift.
-  SELECT '04 Printing', DATE(b.print_end),
-         TIMESTAMP_DIFF(b.print_end, b.print_start, MINUTE) / 60.0
-  FROM bstage b
+  -- Printing is machine time: printers run overnight, so total wall-clock
+  -- hours, never shift-clipped. One interval per physical run.
+  SELECT '04 Printing (total time)', DATE(r.print_end),
+         TIMESTAMP_DIFF(r.print_end, r.print_start, MINUTE) / 60.0
+  FROM (SELECT DISTINCT guid, print_start, print_end FROM brun
+        WHERE print_start IS NOT NULL AND print_end IS NOT NULL) r
   UNION ALL
-  SELECT '05 Print end → wash/sift scan', DATE(b.wash_at),
-         ${sh('b.print_end', 'b.wash_at')}
-  FROM bstage b
+  SELECT '05 Print end → wash/sift scan', DATE(r.wash_at),
+         ${sh('r.print_end', 'r.wash_at')}
+  FROM (SELECT DISTINCT guid, print_end, wash_at FROM brun) r
   UNION ALL
-  -- SLS only: sift done → media blast scan (blast-finished is unrecorded, so
-  -- the blast START is the anchor; blasting itself takes minutes).
-  SELECT '06 Sift → blast scan (SLS)', DATE(b.blast_at),
-         ${sh('b.sift_at', 'b.blast_at')}
-  FROM bstage b WHERE b.sift_at IS NOT NULL AND b.blast_at IS NOT NULL
+  -- SLS only: sift done → media blast scan, paired within the same run.
+  -- Lots with NO blast scan are excluded entirely (blast scanning is not yet
+  -- consistent on the floor), and blast-finished is unrecorded so the blast
+  -- START is the anchor; blasting itself takes minutes.
+  SELECT '06 Sift → blast scan (SLS)', DATE(r.blast_at),
+         ${sh('r.sift_at', 'r.blast_at')}
+  FROM (SELECT DISTINCT guid, sift_at, blast_at FROM brun
+        WHERE sift_at IS NOT NULL AND blast_at IS NOT NULL) r
   UNION ALL
-  -- SLA: wash end → split. SLS: blast → split.
-  SELECT '07 Wash/blast → lot split', DATE(sp.split_at),
-         ${sh('COALESCE(b.blast_at, b.wash_at)', 'sp.split_at')}
-  FROM bstage b JOIN bsplit sp ON sp.print_build_id = b.guid
+  -- SLA: wash end → split. SLS: blast → split (falls back to sift when the
+  -- blast scan was skipped). Per lot, so reused builds pair correctly.
+  SELECT '07 Wash/blast → lot split', DATE(l.split_ts),
+         ${sh('COALESCE(t2.blast_at, t2.wash_at)', 'l.split_ts')}
+  FROM lots l JOIN tulip t2 ON t2.lot_guid = l.lot_guid
+  WHERE COALESCE(t2.blast_at, t2.wash_at) IS NOT NULL
   UNION ALL
   SELECT '08 Lot split → finishing line', DATE(s.ts),
          ${sh('l.split_ts', 's.ts')}
@@ -515,18 +513,11 @@ intervals AS (
   JOIN scans sf ON sf.lot_guid = l.lot_guid AND sf.event_type = 'Pending Finishing'
   JOIN scans sb ON sb.lot_guid = l.lot_guid AND sb.event_type = 'Binned'
   UNION ALL
-  -- No-finishing track, split into the on-scan (should be minutes) and the
-  -- dwell on the binning line until binned. Restricted to lots that never got
-  -- a finishing scan — finishing-track lots also fire Pending Binning later,
-  -- which would contaminate these with finishing time.
-  SELECT '10 Lot split → binning line scan', DATE(s.ts),
-         ${sh('l.split_ts', 's.ts')}
-  FROM lots l
-  JOIN scans s ON s.lot_guid = l.lot_guid AND s.event_type = 'Pending Binning'
-  LEFT JOIN scans pf ON pf.lot_guid = l.lot_guid AND pf.event_type = 'Pending Finishing'
-  WHERE pf.lot_guid IS NULL
-  UNION ALL
-  SELECT '11 Binning line scan → binned', DATE(sb.ts),
+  -- No-finishing track: dwell on the binning line until binned. Restricted to
+  -- lots that never got a finishing scan — finishing-track lots also fire
+  -- Pending Binning later, which would contaminate this with finishing time.
+  -- (The split → binning-line-scan gap is always ~0, so it isn't shown.)
+  SELECT '10 Binning line scan → binned', DATE(sb.ts),
          ${sh('s.ts', 'sb.ts')}
   FROM lots l
   JOIN scans s ON s.lot_guid = l.lot_guid AND s.event_type = 'Pending Binning'
@@ -539,11 +530,11 @@ intervals AS (
   -- (verified: 383 quarantine-app + 349 shipping-app vs 0 post-processing).
   -- Placement on the quarantine line happens at split like the other tracks,
   -- so split → this scan ≈ time the lot waited on the quarantine line.
-  SELECT '12 Quarantine line (split → processed)', DATE(s.ts),
+  SELECT '11 Quarantine line (split → processed)', DATE(s.ts),
          ${sh('l.split_ts', 's.ts')}
   FROM lots l JOIN scans s ON s.lot_guid = l.lot_guid AND s.event_type = 'Quarantine - Routing'
   UNION ALL
-  SELECT '13 Ready to ship → shipped', DATE(f.shipped_at),
+  SELECT '12 Ready to ship → shipped', DATE(f.shipped_at),
          ${sh('r.ready_at', 'f.shipped_at')}
   FROM flt f JOIN ready r ON r.order_id = f.id
   WHERE f.shipped_at IS NOT NULL
@@ -561,23 +552,22 @@ FROM d GROUP BY stage ORDER BY stage`
         ['01 Accepted → DFM approved', 5],
         ['02 Cleared → part in a build', 3.5],
         ['03 Build queued → print start', 18],
-        ['04 Printing', 6],
+        ['04 Printing (total time)', 6],
         ['05 Print end → wash/sift scan', 8],
         ['06 Sift → blast scan (SLS)', 2],
         ['07 Wash/blast → lot split', 12],
         ['08 Lot split → finishing line', 0.4],
         ['09 Finishing line scan → binned', 6],
-        ['10 Lot split → binning line scan', 0.2],
-        ['11 Binning line scan → binned', 3],
-        ['12 Quarantine line (split → processed)', 4],
-        ['13 Ready to ship → shipped', 1],
+        ['10 Binning line scan → binned', 3],
+        ['11 Quarantine line (split → processed)', 4],
+        ['12 Ready to ship → shipped', 1],
       ]
       const r = rng(`pipe:${p.grain}:${p.shiftStart}${p.shiftEnd}${p.shiftDays.join('')}:${p.family}`)
       // Narrower shift windows clip more elapsed time out of every dwell.
       const shiftFactor = Math.min(1, (p.shiftDays.length / 5) * 0.9 + 0.1)
       return STAGES.filter(([stage]) => !(p.family === 'sla' && stage.includes('(SLS)'))).map(([stage, base]) => ({
         stage,
-        n: Math.max(5, Math.round((250 + r() * 200) * (stage.startsWith('12') ? 0.25 : 1))),
+        n: Math.max(5, Math.round((250 + r() * 200) * (stage.startsWith('11') ? 0.25 : 1))),
         median_hours: Math.round(base * shiftFactor * (0.8 + r() * 0.5) * 100) / 100,
       }))
     },
