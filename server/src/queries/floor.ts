@@ -309,7 +309,7 @@ ORDER BY sess.started_at DESC`,
    */
   pipeline_dwell: {
     description:
-      "Order→ship pipeline dwell: median SHIFT-HOURS per stage boundary — elapsed time clipped to the configured production shift (shiftDays ISO 1=Mon..7=Sun, shiftStart/shiftEnd ET; default Mon–Fri 07:30–16:00), so off-shift waiting is not counted. '04 Printing' is machine time and stays wall-clock. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED], DFM→cleared-for-production = print-queue entry, ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. Build stages (build queued [printbuild.created_at]→print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan→lot split) and lot tracks (split→finishing scan; finishing scan→binned = time on the finishing line; split→bin-ship scan; quarantine line dwell = split→first Quarantine-Routing scan, which fires when the lot is picked up for pass/fail at the quarantine/shipping station — verified almost never at post-processing — so with placement happening at split like the other tracks, this measures time waiting on the quarantine line) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. Post-pickup disposition timing is deliberately NOT shown: pass/fail outcomes update the MES-internal lot table without reliably emitting warehouse events. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >720 shift-hours discarded. Cohort anchor = when the stage COMPLETED.",
+      "Order→ship pipeline dwell: median SHIFT-HOURS per stage boundary — elapsed time clipped to the configured production shift (shiftDays ISO 1=Mon..7=Sun, shiftStart/shiftEnd ET; default Mon–Fri 07:30–16:00), so off-shift waiting is not counted. '04 Printing' is machine time and stays wall-clock. Order stages (accepted→DFM approved [all parts PASSED/AT_RISK_APPROVED]; ready-to-ship [last lot Binned]→shipped) cover ~98% of orders. '02 Cleared → part in a build' is the parts-needing-builds queue at LINE-ITEM grain: from ORDER_CLEARED_FOR_PRODUCTION (fires ~3s after final DFM approval — the old DFM→cleared stage read 0 by construction) until the part's first printbuildpart row; the >7-day tail is dominated by ON_HOLD orders, and parts still waiting for a build are not counted (119 such parts on open orders at last check). '03 Build queued → print start' = printbuild.created_at (verified == cloud print-queue submission within ~2s of the Formlabs API) to EVERY physical print start bridged to that build guid — build guids are reused across 2-43 runs, so each run is an interval; builds still waiting in the fleet queue are invisible (survivorship), so the median understates queue pain — the Formlabs Dashboard API measures true per-print queue wait at ~11h wall-clock median / 100h p90. Build stages (print start→print end [Tulip, via the station-app lot↔build bridge]→wash/sift scan→lot split) and lot tracks (split→finishing scan; finishing scan→binned = time on the finishing line; split→bin-ship scan; quarantine line dwell = split→first Quarantine-Routing scan, which fires when the lot is picked up for pass/fail at the quarantine/shipping station — verified almost never at post-processing — so with placement happening at split like the other tracks, this measures time waiting on the quarantine line) exist since station-app go-live 2026-07-02; Form 4 print timestamps ~76% covered, Fuse X1 currently unlogged. Post-pickup disposition timing is deliberately NOT shown: pass/fail outcomes update the MES-internal lot table without reliably emitting warehouse events. Channel filters apply at order level; material/mfg-type filters apply exactly at part level for lot stages and as any-part for order/build stages. Durations <0 or >720 shift-hours discarded. Cohort anchor = when the stage COMPLETED.",
     source:
       'fcm_api_order/orderpart/orderevent/printbuild(+parts) + manufacturing_events (station app) + formcloud_manufacturing.master_table (Tulip)',
     params: zBaseFilters.extend({
@@ -402,6 +402,32 @@ bstage AS (
   JOIN tulip t ON t.lot_guid = br.lot_guid
   GROUP BY b.guid, b.created_at
 ),
+runs AS (
+  -- Every PHYSICAL print run of a build: build guids are reused (44% of
+  -- bridged builds have 2-43 runs), so collapsing to MIN(print_start) measures
+  -- only the first run and reads far too fast. Distinct start timestamps per
+  -- guid ≈ distinct runs (lots from one run share the printer's start time).
+  SELECT DISTINCT b.guid, b.created_at, t.print_start
+  FROM builds b
+  JOIN bridge br ON br.print_build_id = b.guid
+  JOIN tulip t ON t.lot_guid = br.lot_guid
+  WHERE t.print_start IS NOT NULL
+),
+partsq AS (
+  -- Parts-needing-builds queue, per line item: from the order clearing for
+  -- production (fires seconds after final DFM approval) until the part is
+  -- assigned to a print build. printbuild.created_at == cloud-queue
+  -- submission (verified vs the Formlabs API within ~2s), so this queue ends
+  -- exactly where stage 03 begins.
+  SELECT op.guid, ANY_VALUE(c2.cleared_at) AS cleared_at, MIN(pbp.created_at) AS built_at
+  FROM ${T.orderPart} op
+  JOIN cleared c2 ON c2.order_id = op.order_id
+  JOIN ${T.printBuildPart} pbp ON pbp.order_part_id = op.guid
+  WHERE op.order_id IN (SELECT id FROM flt)
+    AND op.dfm_review_status IN ('PASSED', 'AT_RISK_APPROVED')
+    ${partFilter}
+  GROUP BY op.guid
+),
 bsplit AS (
   SELECT e.print_build_id, MIN(e.timestamp) AS split_at
   FROM ${T.mfgEvent} e
@@ -428,13 +454,18 @@ intervals AS (
          ${sh('f.accepted_at', 'd.dfm_done')} AS hours
   FROM flt f JOIN dfm d ON d.order_id = f.id
   UNION ALL
-  SELECT '02 DFM approved → print queue', DATE(c.cleared_at),
-         ${sh('d.dfm_done', 'c.cleared_at')}
-  FROM dfm d JOIN cleared c ON c.order_id = d.order_id
+  -- The old DFM→cleared stage read 0 by construction (ORDER_CLEARED_FOR_
+  -- PRODUCTION fires ~3s after final DFM approval — an automated gate).
+  -- This is the real parts-needing-builds queue, one interval per line item.
+  SELECT '02 Cleared → part in a build', DATE(pq.built_at),
+         ${sh('pq.cleared_at', 'pq.built_at')}
+  FROM partsq pq
   UNION ALL
-  SELECT '03 Build queued → print start', DATE(b.print_start),
-         ${sh('b.created_at', 'b.print_start')}
-  FROM bstage b
+  -- One interval per PHYSICAL run (see runs CTE); waits for runs that haven't
+  -- started yet are invisible here — the fleet queue holds unprinted builds.
+  SELECT '03 Build queued → print start', DATE(r.print_start),
+         ${sh('r.created_at', 'r.print_start')}
+  FROM runs r
   UNION ALL
   -- Printing is machine time: printers run overnight, so wall-clock, not shift.
   SELECT '04 Printing', DATE(b.print_end),
@@ -489,7 +520,7 @@ FROM d GROUP BY stage ORDER BY stage`
     mock: (p) => {
       const STAGES: [string, number][] = [
         ['01 Accepted → DFM approved', 5],
-        ['02 DFM approved → print queue', 0.5],
+        ['02 Cleared → part in a build', 3.5],
         ['03 Build queued → print start', 18],
         ['04 Printing', 6],
         ['05 Print end → wash/sift scan', 8],
