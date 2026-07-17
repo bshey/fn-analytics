@@ -1,7 +1,8 @@
 import { useMemo, useRef, useState } from 'react'
 import type { ColumnDef } from '@tanstack/react-table'
 import { useFilters } from '../../lib/filters'
-import { useAppConfig, useFormlabsPanel, useNamedQuery, type Row } from '../../lib/api'
+import { useAppConfig, useFormlabsGet, useNamedQuery, type Row } from '../../lib/api'
+import { Modal } from '../../components/Modal'
 import { ChartCard } from '../../components/ChartCard'
 import { KpiCard } from '../../components/KpiCard'
 import { DataTable } from '../../components/DataTable'
@@ -87,7 +88,8 @@ function StationsSection({ since, stationTypes }: { since: string; stationTypes:
   const [shiftDays, setShiftDays] = useState<number[]>([1, 2, 3, 4, 5])
   const [shiftStart, setShiftStart] = useState('07:30')
   const [shiftEnd, setShiftEnd] = useState('16:00')
-  const dwell = useNamedQuery('pipeline_dwell', { ...queryParams, shiftDays, shiftStart, shiftEnd })
+  const [family, setFamily] = useState<'all' | 'sla' | 'sls'>('all')
+  const dwell = useNamedQuery('pipeline_dwell', { ...queryParams, shiftDays, shiftStart, shiftEnd, family })
   const thruRef = useRef<EChartHandle>(null)
   const dwellRef = useRef<EChartHandle>(null)
 
@@ -245,41 +247,52 @@ function StationsSection({ since, stationTypes }: { since: string; stationTypes:
         emptyText="No pipeline records in the selected range."
         height={360}
         actions={
-          <div className="flex items-center gap-2">
-            <div className="flex overflow-hidden rounded-md border border-line" title="Shift days counted as dwell">
-              {(['M', 'T', 'W', 'T', 'F', 'S', 'S'] as const).map((label, i) => (
-                <button
-                  key={i}
-                  onClick={() => toggleShiftDay(i + 1)}
-                  className={`px-1.5 py-0.5 text-[11px] font-medium ${
-                    shiftDays.includes(i + 1) ? 'bg-accent/15 text-accent' : 'bg-white text-faint hover:text-sub'
-                  } ${i > 0 ? 'border-l border-line' : ''}`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-            <input
-              type="time"
-              value={shiftStart}
-              max={shiftEnd}
-              onChange={(e) => e.target.value && e.target.value < shiftEnd && setShiftStart(e.target.value)}
-              className="rounded-md border border-line px-1 py-0.5 text-[11.5px]"
-              title="Shift start (ET)"
-            />
-            <span className="text-[11px] text-faint">–</span>
-            <input
-              type="time"
-              value={shiftEnd}
-              min={shiftStart}
-              onChange={(e) => e.target.value && e.target.value > shiftStart && setShiftEnd(e.target.value)}
-              className="rounded-md border border-line px-1 py-0.5 text-[11.5px]"
-              title="Shift end (ET)"
-            />
-          </div>
+          <Segmented
+            size="sm"
+            options={[
+              { value: 'all', label: 'All' },
+              { value: 'sla', label: 'SLA' },
+              { value: 'sls', label: 'SLS' },
+            ]}
+            value={family}
+            onChange={setFamily}
+          />
         }
       >
-        {dwellChart && <EChart ref={dwellRef} option={dwellChart.option} height={360} />}
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-medium text-sub">Shift:</span>
+          <div className="flex overflow-hidden rounded-md border border-line" title="Shift days counted as dwell">
+            {(['M', 'T', 'W', 'T', 'F', 'S', 'S'] as const).map((label, i) => (
+              <button
+                key={i}
+                onClick={() => toggleShiftDay(i + 1)}
+                className={`px-1.5 py-0.5 text-[11px] font-medium ${
+                  shiftDays.includes(i + 1) ? 'bg-accent/15 text-accent' : 'bg-white text-faint hover:text-sub'
+                } ${i > 0 ? 'border-l border-line' : ''}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <input
+            type="time"
+            value={shiftStart}
+            max={shiftEnd}
+            onChange={(e) => e.target.value && e.target.value < shiftEnd && setShiftStart(e.target.value)}
+            className="rounded-md border border-line px-1 py-0.5 text-[11.5px]"
+            title="Shift start (ET)"
+          />
+          <span className="text-[11px] text-faint">–</span>
+          <input
+            type="time"
+            value={shiftEnd}
+            min={shiftStart}
+            onChange={(e) => e.target.value && e.target.value > shiftStart && setShiftEnd(e.target.value)}
+            className="rounded-md border border-line px-1 py-0.5 text-[11.5px]"
+            title="Shift end (ET)"
+          />
+        </div>
+        {dwellChart && <EChart ref={dwellRef} option={dwellChart.option} height={380} />}
         <Caption>
           Only time inside the shift window counts as dwell (Printing stays wall-clock — printers run overnight).
           Quarantine line dwell runs from lot split to pass/fail pickup; the disposition itself rarely reaches the
@@ -296,82 +309,190 @@ function StationsSection({ since, stationTypes }: { since: string; stationTypes:
 
 // ================= D1b · Printer queues (Formlabs Dashboard API) ============
 
-function PrinterQueuesSection() {
-  const queues = useFormlabsPanel('printer_queues', 2 * 60_000)
-  const waits = useFormlabsPanel('printer_queue_waits', 30 * 60_000)
-  const qRows = queues.data?.rows ?? []
-  const wRows = waits.data?.rows ?? []
-  const totalJobs = qRows.reduce((t, r) => t + num0(r.jobs), 0)
+const BILLERICA_GROUPS = ['Billerica Fuse 1+', 'Billerica F4', 'Billerica F4L']
 
-  const hrs = (v: unknown) => `${fmtNum(num0(v), 1)} h`
+function PrinterQueuesSection() {
+  const queues = useFormlabsGet('printer_queues', {}, { staleMs: 2 * 60_000 })
+  const qRows = queues.data?.rows ?? []
+  const totalJobs = qRows.reduce((t, r) => t + num0(r.jobs), 0)
+  const [histTarget, setHistTarget] = useState<{ group: string; material: string } | null>(null)
+
+  const hrs = (v: unknown) => (v === null || v === undefined ? '\u2014' : `${fmtNum(num0(v), 1)} h`)
   const queueCols: ColumnDef<Row, unknown>[] = [
     { header: 'Printer group', accessorKey: 'group' },
+    { header: 'Printers', id: 'printers', accessorFn: (r) => num0(r.printers), cell: ({ row }) => fmtInt(num0(row.original.printers)), meta: { align: 'right' } },
     { header: 'Jobs waiting', id: 'jobs', accessorFn: (r) => num0(r.jobs), cell: ({ row }) => fmtInt(num0(row.original.jobs)), meta: { align: 'right' } },
-    { header: 'Median age', id: 'median_age_h', accessorFn: (r) => num0(r.median_age_h), cell: ({ row }) => hrs(row.original.median_age_h), meta: { align: 'right' } },
-    { header: 'p90 age', id: 'p90_age_h', accessorFn: (r) => num0(r.p90_age_h), cell: ({ row }) => hrs(row.original.p90_age_h), meta: { align: 'right' } },
-    { header: 'Oldest', id: 'oldest_age_h', accessorFn: (r) => num0(r.oldest_age_h), cell: ({ row }) => hrs(row.original.oldest_age_h), meta: { align: 'right' } },
     { header: 'Est. print time', id: 'est_print_hours', accessorFn: (r) => num0(r.est_print_hours), cell: ({ row }) => hrs(row.original.est_print_hours), meta: { align: 'right' } },
-  ]
-  const waitCols: ColumnDef<Row, unknown>[] = [
-    { header: 'Printer group', accessorKey: 'group' },
-    { header: 'Prints', id: 'prints', accessorFn: (r) => num0(r.prints), cell: ({ row }) => fmtInt(num0(row.original.prints)), meta: { align: 'right' } },
-    { header: 'p25', id: 'p25_h', accessorFn: (r) => num0(r.p25_h), cell: ({ row }) => hrs(row.original.p25_h), meta: { align: 'right' } },
-    { header: 'Median wait', id: 'median_h', accessorFn: (r) => num0(r.median_h), cell: ({ row }) => hrs(row.original.median_h), meta: { align: 'right' } },
-    { header: 'p75', id: 'p75_h', accessorFn: (r) => num0(r.p75_h), cell: ({ row }) => hrs(row.original.p75_h), meta: { align: 'right' } },
-    { header: 'p90', id: 'p90_h', accessorFn: (r) => num0(r.p90_h), cell: ({ row }) => hrs(row.original.p90_h), meta: { align: 'right' } },
-    { header: 'Since', accessorKey: 'oldest_start' },
+    { header: 'Per printer', id: 'hours_per_printer', accessorFn: (r) => num0(r.hours_per_printer), cell: ({ row }) => hrs(row.original.hours_per_printer), meta: { align: 'right' } },
   ]
 
   return (
-    <div className="mt-4 grid gap-4 xl:grid-cols-2">
-      <ChartCard
-        title={`Printer queues — live${totalJobs ? ` (${fmtInt(totalJobs)} jobs)` : ''}`}
-        subtitle="Cloud print queue per printer group, right now"
-        info={{
-          definition:
-            'Jobs currently waiting in each printer group\'s cloud queue (Formlabs Dashboard API /groups/{id}/queue/), with age since queue submission in wall-clock hours and the queue\'s total estimated print time. This is the survivorship-free view of "build queued → print start": the pipeline-dwell bar can only measure prints that already started, while these jobs are still waiting. Queue items disappear once their print starts. The global date range and floor filters do not apply — this is a live snapshot.',
-          source: 'Formlabs Dashboard API (api.formlabs.com) — read-only',
-        }}
-        csvRows={qRows}
-        csvName="printer-queues"
-        isLoading={queues.isLoading}
-        isFetching={queues.isFetching}
-        error={queues.error}
-        isEmpty={!qRows.length}
-        emptyText="All printer queues are empty."
-        height={260}
-      >
-        <DataTable data={qRows} columns={queueCols} initialSort={[{ id: 'jobs', desc: true }]} csvName="printer-queues" fit />
-        <Caption>
-          Live snapshot (cached ~3 min) · wall-clock hours · date range &amp; filters don't apply.
-          {queues.data ? ` As of ${fmtDateTime(queues.data.meta.retrievedAt)}.` : ''}
-        </Caption>
-      </ChartCard>
+    <>
+      <div className="mt-4">
+        <ChartCard
+          title={`Printer queues \u2014 live${totalJobs ? ` (${fmtInt(totalJobs)} jobs)` : ''}`}
+          subtitle="Billerica cloud print queues, right now"
+          info={{
+            definition:
+              'Jobs currently waiting in each Billerica printer group\u2019s cloud queue (Formlabs Dashboard API), with the group\u2019s printer count, total estimated print time of the backlog, and estimated time per printer (the queue\u2019s machine-days of work). Queue items disappear once their print starts. The global date range and floor filters do not apply \u2014 this is a live snapshot.',
+            source: 'Formlabs Dashboard API (api.formlabs.com) \u2014 read-only',
+          }}
+          csvRows={qRows}
+          csvName="printer-queues"
+          isLoading={queues.isLoading}
+          isFetching={queues.isFetching}
+          error={queues.error}
+          isEmpty={!qRows.length}
+          emptyText="All printer queues are empty."
+          height={200}
+        >
+          <DataTable data={qRows} columns={queueCols} initialSort={[{ id: 'jobs', desc: true }]} csvName="printer-queues" fit />
+          <Caption>
+            Live snapshot (cached ~3 min) \u00b7 wall-clock hours \u00b7 date range &amp; filters don&apos;t apply.
+            {queues.data ? ` As of ${fmtDateTime(queues.data.meta.retrievedAt)}.` : ''}
+          </Caption>
+        </ChartCard>
+      </div>
+      <div className="mt-4 grid gap-4 xl:grid-cols-3">
+        {BILLERICA_GROUPS.map((g) => (
+          <GroupMaterialCard key={g} group={g} onHistory={(material) => setHistTarget({ group: g, material })} />
+        ))}
+      </div>
+      {histTarget && <QueueHistoryModal group={histTarget.group} material={histTarget.material} onClose={() => setHistTarget(null)} />}
+    </>
+  )
+}
 
-      <ChartCard
-        title="Print queue wait — recent prints"
-        subtitle="Queue submission → print start, per physical print (wall-clock)"
-        info={{
-          definition:
-            'For each printer\'s ~50 most recent prints (Formlabs Dashboard API), the wall-clock hours from print_intent.created_at (the moment the job entered the cloud queue — verified to equal fcm build creation within ~2s) to print_started_at, per physical print run. This is the API-accurate version of the pipeline chart\'s "Build queued → print start": it sees every run of reused build records and is not clipped to shift hours (printers run around the clock). REMOTE-initiated prints are excluded. Sample depth is the most recent page per printer, so the "Since" column shows how far back each group\'s sample reaches. The global date range and floor filters do not apply.',
-          source: 'Formlabs Dashboard API (api.formlabs.com) — read-only',
-        }}
-        csvRows={wRows}
-        csvName="printer-queue-waits"
-        isLoading={waits.isLoading}
-        isFetching={waits.isFetching}
-        error={waits.error}
-        isEmpty={!wRows.length}
-        emptyText="No recent prints with queue timestamps."
-        height={260}
-      >
-        <DataTable data={wRows} columns={waitCols} initialSort={[{ id: 'prints', desc: true }]} csvName="printer-queue-waits" fit />
-        <Caption>
-          Most recent ~50 prints per printer (cached ~30 min) · wall-clock hours, not shift-clipped.
-          {waits.data ? ` As of ${fmtDateTime(waits.data.meta.retrievedAt)}.` : ''}
-        </Caption>
-      </ChartCard>
-    </div>
+function GroupMaterialCard({ group, onHistory }: { group: string; onHistory: (material: string) => void }) {
+  const q = useFormlabsGet('printer_group_materials', { group }, { staleMs: 15 * 60_000 })
+  const rows = q.data?.rows ?? []
+  const hrs = (v: unknown) => (v === null || v === undefined ? '\u2014' : `${fmtNum(num0(v), 1)} h`)
+  const cols: ColumnDef<Row, unknown>[] = [
+    { header: 'Material', accessorKey: 'material' },
+    { header: 'Printers', id: 'printers_setup', accessorFn: (r) => num0(r.printers_setup), cell: ({ row }) => fmtInt(num0(row.original.printers_setup)), meta: { align: 'right' } },
+    { header: 'Backlog', id: 'jobs', accessorFn: (r) => num0(r.jobs), cell: ({ row }) => fmtInt(num0(row.original.jobs)), meta: { align: 'right' } },
+    { header: 'Est. time', id: 'est_print_hours', accessorFn: (r) => num0(r.est_print_hours), cell: ({ row }) => hrs(row.original.est_print_hours), meta: { align: 'right' } },
+    {
+      header: 'Per printer',
+      id: 'hours_per_printer',
+      accessorFn: (r) => (r.hours_per_printer === null ? -1 : num0(r.hours_per_printer)),
+      cell: ({ row }) => (row.original.hours_per_printer === null ? <span className="text-faint" title="No printers set up for this material">N/A</span> : hrs(row.original.hours_per_printer)),
+      meta: { align: 'right' },
+    },
+    {
+      header: 'Median wait',
+      id: 'median_wait_h',
+      accessorFn: (r) => (r.median_wait_h === null ? -1 : num0(r.median_wait_h)),
+      cell: ({ row }) => hrs(row.original.median_wait_h),
+      meta: { align: 'right' },
+    },
+    {
+      header: '',
+      id: 'history',
+      cell: ({ row }) => (
+        <button
+          className="rounded-md border border-line px-1.5 py-0.5 text-[11px] text-sub hover:bg-page hover:text-ink"
+          onClick={() => onHistory(String(row.original.material))}
+          title="Queue history for this material"
+        >
+          History
+        </button>
+      ),
+    },
+  ]
+  return (
+    <ChartCard
+      title={group}
+      subtitle="Queue by material"
+      info={{
+        definition:
+          'The group\u2019s cloud print queue broken down by material (common names). Printers = machines currently set up for the material (Fuse: powder in hopper; SLA: installed cartridge; fallback: last print). Backlog = queued jobs; Est. time = their summed estimated print time; Per printer = est. time \u00f7 printers set up (N/A when none is set up \u2014 that backlog cannot start). Median wait = queue submission \u2192 print start over each printer\u2019s recent prints (~150 per printer, wall-clock). History opens the reconstructed queue timeline for the material.',
+        source: 'Formlabs Dashboard API (api.formlabs.com) \u2014 read-only',
+      }}
+      csvRows={rows}
+      csvName={`queue-${group}`}
+      isLoading={q.isLoading}
+      isFetching={q.isFetching}
+      error={q.error}
+      isEmpty={!rows.length}
+      emptyText="No queue, prints or set-up printers found."
+      height={220}
+    >
+      <DataTable data={rows} columns={cols} initialSort={[{ id: 'jobs', desc: true }]} csvName={`queue-${group}`} fit />
+      <Caption>Cached ~15 min \u00b7 wall-clock hours \u00b7 date range &amp; filters don&apos;t apply.</Caption>
+    </ChartCard>
+  )
+}
+
+function QueueHistoryModal({ group, material, onClose }: { group: string; material: string; onClose: () => void }) {
+  const { filters, queryParams } = useFilters()
+  const grain = filters.grain
+  const q = useFormlabsGet(
+    'printer_group_history',
+    { group, material, start: queryParams.start, end: queryParams.end, grain },
+    { staleMs: 15 * 60_000 },
+  )
+  const rows = q.data?.rows ?? []
+  const periods = rows.map((r) => String(r.period))
+  const labels = periods.map((p) => periodLabel(p, grain))
+
+  const option = useMemo(() => {
+    const panels: { title: string; key: string; color: string }[] = [
+      { title: 'Avg outstanding print hours', key: 'avg_outstanding_hours', color: seriesColor('Outstanding hours') },
+      { title: 'Median queue wait (h)', key: 'median_wait_h', color: seriesColor('Median wait') },
+      { title: 'Avg jobs in queue', key: 'avg_jobs', color: seriesColor('Jobs') },
+    ]
+    const gap = 100 / panels.length
+    return {
+      tooltip: { trigger: 'axis', valueFormatter: (v: unknown) => (v == null ? '\u2014' : fmtNum(Number(v), 1)) },
+      axisPointer: { link: [{ xAxisIndex: 'all' }] },
+      grid: panels.map((_, i) => ({ left: 48, right: 16, top: `${i * gap + 7}%`, height: `${gap - 13}%`, containLabel: false })),
+      xAxis: panels.map((_, i) => ({
+        type: 'category',
+        gridIndex: i,
+        data: labels,
+        axisLabel: { show: i === panels.length - 1 },
+      })),
+      yAxis: panels.map((p, i) => ({
+        type: 'value',
+        gridIndex: i,
+        name: p.title,
+        nameLocation: 'end',
+        nameGap: 8,
+        nameTextStyle: { fontSize: 11, align: 'left', padding: [0, 0, 0, -34] },
+      })),
+      series: panels.map((p, i) => ({
+        ...lineDefaults,
+        name: p.title,
+        xAxisIndex: i,
+        yAxisIndex: i,
+        color: p.color,
+        connectNulls: false,
+        data: rows.map((r) => (r[p.key] === null || r[p.key] === undefined ? null : num0(r[p.key]))),
+      })),
+    }
+  }, [rows, labels])
+
+  return (
+    <Modal title={`${group} \u00b7 ${material} \u2014 queue history`} onClose={onClose}>
+      {q.isLoading ? (
+        <div className="py-10 text-center text-[13px] text-faint">Reconstructing queue history\u2026</div>
+      ) : q.error ? (
+        <div className="py-10 text-center text-[13px] text-bad">{q.error.message}</div>
+      ) : !rows.length ? (
+        <div className="py-10 text-center text-[13px] text-faint">No data in this window.</div>
+      ) : (
+        <>
+          <EChart option={option} height={420} />
+          <p className="mt-2 text-[11.5px] text-faint">
+            Reconstructed from queue-submission \u2192 print-start intervals of recent prints plus the current live queue,
+            over the global date range ({fmtDate(queryParams.start)} \u2013 {fmtDate(queryParams.end)}, by {grain}).
+            Outstanding state is sampled daily at noon ET. Periods older than the print sample reach are blank, and
+            cancelled queue items are invisible \u2014 treat early periods as lower bounds. Wall-clock hours.
+          </p>
+        </>
+      )}
+    </Modal>
   )
 }
 

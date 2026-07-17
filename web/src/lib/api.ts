@@ -50,19 +50,24 @@ export function useNamedQuery(
 }
 
 /** Formlabs Dashboard API panels — same {rows, meta} envelope as named queries. */
-export function useFormlabsPanel(
-  name: 'printer_queues' | 'printer_queue_waits',
-  staleMs: number,
+export function useFormlabsGet(
+  name: string,
+  params: Record<string, string>,
+  opts: { staleMs: number; enabled?: boolean },
 ): UseQueryResult<QueryPayload, Error & { hint?: string }> {
   return useQuery({
-    queryKey: ['formlabs', name],
+    queryKey: ['formlabs', name, params],
     queryFn: async () => {
-      const res = await fetch(`/api/${name}${Date.now() < forceRefreshUntil ? '?refresh=1' : ''}`)
+      const qs = new URLSearchParams(params)
+      if (Date.now() < forceRefreshUntil) qs.set('refresh', '1')
+      const s = qs.toString()
+      const res = await fetch(`/api/${name}${s ? `?${s}` : ''}`)
       const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
       if (!res.ok) throw Object.assign(new Error(body.error ?? `HTTP ${res.status}`), { hint: body.hint }) as Error & { hint?: string }
       return body as QueryPayload
     },
-    staleTime: staleMs,
+    staleTime: opts.staleMs,
+    enabled: opts.enabled,
     retry: 1,
   }) as UseQueryResult<QueryPayload, Error & { hint?: string }>
 }

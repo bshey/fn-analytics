@@ -46,7 +46,12 @@ const CASES = [
 ]
 
 // Formlabs Dashboard API panels — GET endpoints outside the query registry.
-const GET_CASES = ['printer_queues', 'printer_queue_waits']
+const GET_CASES = [
+  'printer_queues',
+  'printer_group_materials?group=Billerica%20Fuse%201%2B',
+  'printer_group_materials?group=Billerica%20F4',
+  'printer_group_history?group=Billerica%20Fuse%201%2B&material=Nylon%2012&start=2026-06-15&end=2026-07-08&grain=week',
+]
 
 let failures = 0
 const results = []
@@ -56,10 +61,10 @@ for (const name of GET_CASES) {
     const body = await res.json()
     const ok = res.ok && Array.isArray(body.rows)
     if (!ok) failures++
-    results.push({ query: `GET ${name}`, status: res.status, rows: Array.isArray(body.rows) ? body.rows.length : `✗ ${body.error ?? '?'}` })
+    results.push({ query: `GET ${name.split("?")[0]}${name.includes("group=")?" ("+decodeURIComponent(name.split("group=")[1].split("&")[0])+")":""}`, status: res.status, rows: Array.isArray(body.rows) ? body.rows.length : `✗ ${body.error ?? '?'}` })
   } catch (e) {
     failures++
-    results.push({ query: `GET ${name}`, status: 'ERR', rows: e.message })
+    results.push({ query: `GET ${name.split("?")[0]}${name.includes("group=")?" ("+decodeURIComponent(name.split("group=")[1].split("&")[0])+")":""}`, status: 'ERR', rows: e.message })
   }
 }
 for (const [name, params] of CASES) {

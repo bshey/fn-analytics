@@ -1,10 +1,10 @@
 /**
- * Formlabs Dashboard API client (read-only) — live printer queues and
- * per-physical-print queue waits. This is the survivorship-free source for
- * "build queued → print start": the warehouse only sees prints that already
- * happened, while /groups/{id}/queue/ shows what is waiting right now, and
- * each print run carries print_intent.created_at = when the job entered the
- * cloud queue (verified: fcm printbuild.created_at == queue submission ±2s).
+ * Formlabs Dashboard API client (read-only) — live Billerica printer queues
+ * and per-material queue analytics. This is the survivorship-free source for
+ * printer-queue truth: /groups/{id}/queue/ shows what is waiting right now,
+ * and each print run carries print_intent.created_at = when the job entered
+ * the cloud queue (verified: fcm printbuild.created_at == queue submission
+ * ±2s), so history can be reconstructed from intent→start intervals.
  *
  * Auth: OAuth client credentials. FORMLABS_API_TOKEN in .env is the client
  * SECRET (using it as a bearer returns 401); tokens live 24h and are cached
@@ -12,10 +12,14 @@
  * hint so the UI can show actionable messages.
  */
 import { config } from './config.js'
+import { cacheGet, cacheSet } from './cache.js'
 import type { Row } from './registry.js'
-import { rng } from './mock/helpers.js'
+import { rng, periodsBetween } from './mock/helpers.js'
 
 const BASE = 'https://api.formlabs.com/developer/v1'
+
+/** The panels deliberately cover Billerica production only (owner request). */
+export const BILLERICA_GROUPS = ['Billerica Fuse 1+', 'Billerica F4', 'Billerica F4L'] as const
 
 export class FormlabsError extends Error {
   status: number
@@ -87,22 +91,23 @@ interface Group {
 interface QueueItem {
   created_at?: string
   estimated_duration_ms?: number
-  username?: string
+  material_name?: string
 }
 
 interface Printer {
   serial: string
   group?: Group | null
+  printer_status?: { hopper_material?: string | null } | null
+  cartridge_status?: { cartridge?: { material?: string | null } | null } | null
+  previous_print_run?: { material?: string | null } | null
 }
 
 interface PrintRun {
   print_started_at?: string | null
-  user?: { username?: string } | null
+  material?: string | null
+  material_name?: string | null
+  estimated_duration_ms?: number | null
   print_intent?: { created_at?: string; initiated_on?: string } | null
-}
-
-function hoursSince(iso: string, now: number): number {
-  return (now - new Date(iso).getTime()) / 3_600_000
 }
 
 function quantile(sorted: number[], q: number): number {
@@ -112,6 +117,7 @@ function quantile(sorted: number[], q: number): number {
 }
 
 const round1 = (v: number) => Math.round(v * 10) / 10
+const H = 3_600_000
 
 /** Small concurrency pool for per-printer fetches. */
 async function pool<T, R>(inputs: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
@@ -128,111 +134,294 @@ async function pool<T, R>(inputs: T[], limit: number, fn: (t: T) => Promise<R>):
   return out
 }
 
-/** Live cloud print queue per printer group: count + age quantiles. */
+// ---------------------------------------------------------------------------
+// Live queues overview — Billerica groups only.
+// ---------------------------------------------------------------------------
+
 export async function fetchPrinterQueues(): Promise<Row[]> {
-  const groups = items<Group>(await get('/groups/'))
-  const now = Date.now()
+  const [groupsBody, printersBody] = await Promise.all([get('/groups/'), get('/printers/')])
+  const groups = items<Group>(groupsBody).filter((g) => (BILLERICA_GROUPS as readonly string[]).includes(g.name))
+  const printers = items<Printer>(printersBody)
+  const printerCount = new Map<string, number>()
+  for (const p of printers) {
+    const g = p.group?.name
+    if (g) printerCount.set(g, (printerCount.get(g) ?? 0) + 1)
+  }
   const rows = await pool(groups, 4, async (g) => {
     const queue = items<QueueItem>(await get(`/groups/${g.id}/queue/`))
-    const ages = queue
-      .filter((q) => q.created_at)
-      .map((q) => hoursSince(q.created_at!, now))
-      .sort((a, b) => a - b)
     const estMs = queue.reduce((t, q) => t + (q.estimated_duration_ms ?? 0), 0)
+    const nPrinters = printerCount.get(g.name) ?? 0
     return {
       group: g.name,
+      printers: nPrinters,
       jobs: queue.length,
-      median_age_h: round1(quantile(ages, 0.5)),
-      p90_age_h: round1(quantile(ages, 0.9)),
-      oldest_age_h: round1(ages[ages.length - 1] ?? 0),
-      est_print_hours: round1(estMs / 3_600_000),
+      est_print_hours: round1(estMs / H),
+      hours_per_printer: nPrinters > 0 ? round1(estMs / H / nPrinters) : null,
     } satisfies Row
   })
-  return rows.filter((r) => (r.jobs as number) > 0).sort((a, b) => (b.jobs as number) - (a.jobs as number))
+  return rows.sort((a, b) => (b.jobs as number) - (a.jobs as number))
+}
+
+// ---------------------------------------------------------------------------
+// Per-group material analytics — raw group data cached once, sliced two ways.
+// ---------------------------------------------------------------------------
+
+interface GroupData {
+  printers: { serial: string; setupSku: string | null }[]
+  prints: { sku: string | null; name: string | null; intentAt: number; startedAt: number; estMs: number; remote: boolean }[]
+  queue: { name: string; createdAt: number; estMs: number }[]
+  skuToName: Map<string, string>
+}
+
+const PAGE_DEPTH = 3
+const SAMPLE_CUTOFF_DAYS = 60
+
+async function getGroupData(groupName: string): Promise<GroupData> {
+  const key = `flgrp:${groupName}`
+  const hit = cacheGet<GroupData>(key)
+  if (hit) return hit
+
+  const [groupsBody, printersBody] = await Promise.all([get('/groups/'), get('/printers/')])
+  const group = items<Group>(groupsBody).find((g) => g.name === groupName)
+  if (!group) throw new FormlabsError(`Unknown printer group: ${groupName}`, 404)
+  const printers = items<Printer>(printersBody).filter((p) => p.serial && p.group?.name === groupName)
+
+  const queueItems = items<QueueItem>(await get(`/groups/${group.id}/queue/`))
+  const cutoff = Date.now() - SAMPLE_CUTOFF_DAYS * 24 * H
+
+  const perPrinter = await pool(printers, 10, async (p) => {
+    const runs: PrintRun[] = []
+    for (let page = 1; page <= PAGE_DEPTH; page++) {
+      let batch: PrintRun[] = []
+      try {
+        batch = items<PrintRun>(await get(`/printers/${p.serial}/prints/?per_page=50&page=${page}`))
+      } catch {
+        break // a flaky printer must not kill the panel
+      }
+      runs.push(...batch)
+      if (batch.length < 50) break
+      const oldest = batch[batch.length - 1]?.print_started_at
+      if (oldest && new Date(oldest).getTime() < cutoff) break
+    }
+    return runs
+  })
+
+  const skuToName = new Map<string, string>()
+  const prints: GroupData['prints'] = []
+  for (const runs of perPrinter) {
+    for (const r of runs) {
+      if (r.material && r.material_name) skuToName.set(r.material, r.material_name)
+      const intent = r.print_intent?.created_at
+      const started = r.print_started_at
+      if (!intent || !started) continue
+      prints.push({
+        sku: r.material ?? null,
+        name: r.material_name ?? null,
+        intentAt: new Date(intent).getTime(),
+        startedAt: new Date(started).getTime(),
+        estMs: r.estimated_duration_ms ?? 0,
+        remote: r.print_intent?.initiated_on === 'REMOTE',
+      })
+    }
+  }
+
+  const data: GroupData = {
+    printers: printers.map((p) => ({
+      serial: p.serial,
+      setupSku:
+        (p.printer_status?.hopper_material || null) ??
+        p.cartridge_status?.cartridge?.material ??
+        p.previous_print_run?.material ??
+        null,
+    })),
+    prints,
+    queue: queueItems.map((q) => ({
+      name: q.material_name ?? 'Unknown',
+      createdAt: q.created_at ? new Date(q.created_at).getTime() : Date.now(),
+      estMs: q.estimated_duration_ms ?? 0,
+    })),
+    skuToName,
+  }
+  cacheSet(key, data, 1800)
+  return data
+}
+
+function waitsOf(prints: GroupData['prints']): number[] {
+  return prints
+    .filter((p) => !p.remote)
+    .map((p) => (p.startedAt - p.intentAt) / H)
+    .filter((w) => Number.isFinite(w) && w >= 0 && w <= 45 * 24)
+    .sort((a, b) => a - b)
+}
+
+/** Per-material table for one group: setup, backlog, est time, median wait. */
+export async function fetchGroupMaterials(groupName: string): Promise<Row[]> {
+  const d = await getGroupData(groupName)
+  // Queue items say "Nylon 12 GF" while hopper SKUs map to "Nylon 12 GF V1" —
+  // merge a versioned name into its stripped form when that form is a queue
+  // material, so set-up printers count against the backlog they can serve.
+  const queueNames = new Set(d.queue.map((q) => q.name))
+  const canon = (name: string): string => {
+    if (queueNames.has(name)) return name
+    const stripped = name.replace(/\s+V[\d.]+$/, '')
+    return queueNames.has(stripped) ? stripped : name
+  }
+  const mats = new Map<string, { jobs: number; estMs: number; printsOf: GroupData['prints']; setup: number }>()
+  const entry = (name: string) => {
+    let m = mats.get(name)
+    if (!m) mats.set(name, (m = { jobs: 0, estMs: 0, printsOf: [], setup: 0 }))
+    return m
+  }
+  for (const q of d.queue) {
+    const m = entry(q.name)
+    m.jobs++
+    m.estMs += q.estMs
+  }
+  for (const p of d.prints) {
+    if (p.name) entry(canon(p.name)).printsOf.push(p)
+  }
+  for (const p of d.printers) {
+    if (!p.setupSku) continue
+    entry(canon(d.skuToName.get(p.setupSku) ?? p.setupSku)).setup++
+  }
+  return [...mats.entries()]
+    .map(([material, m]) => {
+      const waits = waitsOf(m.printsOf)
+      return {
+        material,
+        printers_setup: m.setup,
+        jobs: m.jobs,
+        est_print_hours: round1(m.estMs / H),
+        hours_per_printer: m.setup > 0 ? round1(m.estMs / H / m.setup) : null,
+        median_wait_h: waits.length ? round1(quantile(waits, 0.5)) : null,
+        recent_prints: waits.length,
+      } satisfies Row
+    })
+    .filter((r) => (r.jobs as number) > 0 || (r.printers_setup as number) > 0 || (r.recent_prints as number) > 0)
+    .sort((a, b) => (b.jobs as number) - (a.jobs as number) || (b.est_print_hours as number) - (a.est_print_hours as number))
 }
 
 /**
- * Queue submission → print start, per PHYSICAL print run, from each printer's
- * most recent prints page. Wall-clock hours (printers run around the clock).
- * REMOTE-initiated prints are excluded (their intents postdate the start).
+ * Queue history for one group+material, reconstructed from intent→start
+ * intervals plus the current queue: at any past instant a job was outstanding
+ * iff its intent existed but its print hadn't started. Periods older than the
+ * sampled prints reach are returned as nulls, not zeros.
  */
-export async function fetchQueueWaits(): Promise<Row[]> {
-  const printers = items<Printer>(await get('/printers/'))
-  const withGroup = printers.filter((p) => p.serial && p.group?.name)
-  const perPrinter = await pool(withGroup, 10, async (p) => {
-    try {
-      const prints = items<PrintRun>(await get(`/printers/${p.serial}/prints/?per_page=50&page=1`))
-      return { group: p.group!.name, prints }
-    } catch {
-      return { group: p.group!.name, prints: [] as PrintRun[] } // one flaky printer must not kill the panel
-    }
-  })
-  const byGroup = new Map<string, { dwells: number[]; starts: number[] }>()
-  for (const { group, prints } of perPrinter) {
-    for (const pr of prints) {
-      const intent = pr.print_intent?.created_at
-      const started = pr.print_started_at
-      if (!intent || !started) continue
-      if (pr.print_intent?.initiated_on === 'REMOTE') continue
-      const dwell = (new Date(started).getTime() - new Date(intent).getTime()) / 3_600_000
-      if (!Number.isFinite(dwell) || dwell < 0 || dwell > 45 * 24) continue
-      let g = byGroup.get(group)
-      if (!g) byGroup.set(group, (g = { dwells: [], starts: [] }))
-      g.dwells.push(dwell)
-      g.starts.push(new Date(started).getTime())
-    }
+export async function fetchGroupHistory(
+  groupName: string,
+  material: string,
+  start: string,
+  end: string,
+  grain: 'day' | 'week' | 'month' | 'quarter' | 'year',
+): Promise<Row[]> {
+  const d = await getGroupData(groupName)
+  const queueNames = new Set(d.queue.map((q) => q.name))
+  const canon = (name: string): string => {
+    if (queueNames.has(name)) return name
+    const stripped = name.replace(/\s+V[\d.]+$/, '')
+    return queueNames.has(stripped) ? stripped : name
   }
-  return [...byGroup.entries()]
-    .map(([group, g]) => {
-      const sorted = [...g.dwells].sort((a, b) => a - b)
-      return {
-        group,
-        prints: sorted.length,
-        p25_h: round1(quantile(sorted, 0.25)),
-        median_h: round1(quantile(sorted, 0.5)),
-        p75_h: round1(quantile(sorted, 0.75)),
-        p90_h: round1(quantile(sorted, 0.9)),
-        oldest_start: new Date(Math.min(...g.starts)).toISOString().slice(0, 10),
-      } satisfies Row
+  const prints = d.prints.filter((p) => p.name && canon(p.name) === material)
+  const queue = d.queue.filter((q) => q.name === material)
+  const horizon = prints.length ? Math.min(...prints.map((p) => p.intentAt)) : Date.now()
+  const periods = periodsBetween(start, end, grain)
+  const now = Date.now()
+  const rows: Row[] = []
+  for (let i = 0; i < periods.length; i++) {
+    const pStart = new Date(`${periods[i]}T00:00:00Z`).getTime()
+    const pEnd = i + 1 < periods.length ? new Date(`${periods[i + 1]}T00:00:00Z`).getTime() : new Date(`${end}T00:00:00Z`).getTime() + 24 * H
+    if (pEnd <= horizon) {
+      rows.push({ period: periods[i], avg_outstanding_hours: null, avg_jobs: null, median_wait_h: null, prints_started: 0 })
+      continue
+    }
+    const startedIn = prints.filter((p) => p.startedAt >= pStart && p.startedAt < pEnd)
+    const waits = waitsOf(startedIn)
+    // Sample outstanding state daily at 16:00 UTC (noon ET).
+    let samples = 0
+    let jobsSum = 0
+    let hoursSum = 0
+    for (let t = pStart + 16 * H; t < Math.min(pEnd, now); t += 24 * H) {
+      samples++
+      let jobs = 0
+      let ms = 0
+      for (const p of prints) {
+        if (p.intentAt <= t && t < p.startedAt) {
+          jobs++
+          ms += p.estMs
+        }
+      }
+      for (const q of queue) {
+        if (q.createdAt <= t) {
+          jobs++
+          ms += q.estMs
+        }
+      }
+      jobsSum += jobs
+      hoursSum += ms / H
+    }
+    rows.push({
+      period: periods[i],
+      avg_outstanding_hours: samples ? round1(hoursSum / samples) : null,
+      avg_jobs: samples ? round1(jobsSum / samples) : null,
+      median_wait_h: waits.length ? round1(quantile(waits, 0.5)) : null,
+      prints_started: startedIn.length,
     })
-    .filter((r) => (r.prints as number) > 0)
-    .sort((a, b) => (b.prints as number) - (a.prints as number))
+  }
+  return rows
 }
 
 // ---------------------------------------------------------------------------
 // MOCK=1 — deterministic demo rows, same shapes as the live aggregations.
 // ---------------------------------------------------------------------------
 
-const MOCK_GROUPS = ['Billerica Fuse 1+', 'Billerica F4', 'Billerica F4L', 'MSB Ohio F4', 'MSB Ohio F4L']
+const MOCK_MATS = ['Nylon 12', 'Nylon 12 GF', 'Grey V5', 'White V5', 'Tough 2000', 'Clear V5']
 
 export function mockPrinterQueues(): Row[] {
   const r = rng('flq:queues')
-  return MOCK_GROUPS.map((group, i) => {
+  return BILLERICA_GROUPS.map((group, i) => {
+    const printers = i === 0 ? 24 : 18 + Math.round(r() * 14)
     const jobs = i === 0 ? 240 + Math.round(r() * 60) : Math.round(r() * 50)
-    const median = 8 + r() * 30
+    const estH = jobs * (4 + r() * 6)
     return {
       group,
+      printers,
       jobs,
-      median_age_h: round1(median),
-      p90_age_h: round1(median * (1.5 + r())),
-      oldest_age_h: round1(median * (2 + r() * 2)),
-      est_print_hours: round1(jobs * (4 + r() * 6)),
+      est_print_hours: round1(estH),
+      hours_per_printer: printers > 0 ? round1(estH / printers) : null,
     }
-  }).filter((row) => row.jobs > 0)
+  })
 }
 
-export function mockQueueWaits(): Row[] {
-  const r = rng('flq:waits')
-  return MOCK_GROUPS.map((group) => {
-    const median = 3 + r() * 15
+export function mockGroupMaterials(group: string): Row[] {
+  const r = rng(`flq:mats:${group}`)
+  const isFuse = group.includes('Fuse')
+  const mats = isFuse ? MOCK_MATS.slice(0, 2) : MOCK_MATS.slice(2)
+  return mats.map((material, i) => {
+    const setup = i === 0 ? 10 + Math.round(r() * 10) : Math.round(r() * 6)
+    const jobs = Math.round(r() * (isFuse ? 180 : 30))
+    const estH = jobs * (3 + r() * 8)
     return {
-      group,
-      prints: 40 + Math.round(r() * 300),
-      p25_h: round1(median * 0.2),
-      median_h: round1(median),
-      p75_h: round1(median * (2.5 + r() * 2)),
-      p90_h: round1(median * (5 + r() * 4)),
-      oldest_start: '2026-06-20',
+      material,
+      printers_setup: setup,
+      jobs,
+      est_print_hours: round1(estH),
+      hours_per_printer: setup > 0 ? round1(estH / setup) : null,
+      median_wait_h: round1(2 + r() * 30),
+      recent_prints: 20 + Math.round(r() * 200),
+    }
+  })
+}
+
+export function mockGroupHistory(group: string, material: string, start: string, end: string, grain: 'day' | 'week' | 'month' | 'quarter' | 'year'): Row[] {
+  const r = rng(`flq:hist:${group}:${material}:${grain}`)
+  return periodsBetween(start, end, grain).map((period) => {
+    const jobs = 20 + r() * 120
+    return {
+      period,
+      avg_outstanding_hours: round1(jobs * (4 + r() * 4)),
+      avg_jobs: round1(jobs),
+      median_wait_h: round1(2 + r() * 40),
+      prints_started: Math.round(5 + r() * 60),
     }
   })
 }

@@ -9,12 +9,15 @@ import { mapMaterialRows } from './queries/dims.js'
 import type { Row } from './registry.js'
 import { CHANNELS, MFG_TYPES } from './sql.js'
 import {
+  BILLERICA_GROUPS,
   FormlabsError,
+  fetchGroupHistory,
+  fetchGroupMaterials,
   fetchPrinterQueues,
-  fetchQueueWaits,
   hasFormlabsCreds,
+  mockGroupHistory,
+  mockGroupMaterials,
   mockPrinterQueues,
-  mockQueueWaits,
 } from './formlabs.js'
 
 export const app = express()
@@ -163,7 +166,46 @@ function formlabsRoute(name: string, ttlSeconds: number, live: () => Promise<Row
 }
 
 app.get('/api/printer_queues', formlabsRoute('printer_queues', 180, fetchPrinterQueues, mockPrinterQueues))
-app.get('/api/printer_queue_waits', formlabsRoute('printer_queue_waits', 1800, fetchQueueWaits, mockQueueWaits))
+
+function parseGroup(req: express.Request): string | null {
+  const g = String(req.query.group ?? '')
+  return (BILLERICA_GROUPS as readonly string[]).includes(g) ? g : null
+}
+
+app.get('/api/printer_group_materials', (req, res, next) => {
+  const group = parseGroup(req)
+  if (!group) {
+    res.status(400).json({ error: `group must be one of: ${BILLERICA_GROUPS.join(', ')}` })
+    return
+  }
+  formlabsRoute(
+    `printer_group_materials:${group}`,
+    900,
+    () => fetchGroupMaterials(group),
+    () => mockGroupMaterials(group),
+  )(req, res, next)
+})
+
+const GRAINS = ['day', 'week', 'month', 'quarter', 'year'] as const
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+app.get('/api/printer_group_history', (req, res, next) => {
+  const group = parseGroup(req)
+  const material = String(req.query.material ?? '').slice(0, 80)
+  const start = String(req.query.start ?? '')
+  const end = String(req.query.end ?? '')
+  const grain = String(req.query.grain ?? 'day') as (typeof GRAINS)[number]
+  if (!group || !material || !ISO_DATE.test(start) || !ISO_DATE.test(end) || !GRAINS.includes(grain) || start > end) {
+    res.status(400).json({ error: 'Expected group (Billerica), material, start/end (YYYY-MM-DD), grain' })
+    return
+  }
+  formlabsRoute(
+    `printer_group_history:${group}:${material}:${start}:${end}:${grain}`,
+    900,
+    () => fetchGroupHistory(group, material, start, end, grain),
+    () => mockGroupHistory(group, material, start, end, grain),
+  )(req, res, next)
+})
 
 function handleError(res: express.Response, e: unknown): void {
   if (e instanceof RedashError) {
