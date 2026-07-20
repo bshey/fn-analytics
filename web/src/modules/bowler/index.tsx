@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useFormlabsGet, useNamedQuery, type Row } from '../../lib/api'
 import { useFilters } from '../../lib/filters'
+import { businessHours, etDate } from '../../lib/bizhours'
 import { isCurrentPeriod, periodLabel, periodStart } from '../../lib/dates'
 import { fmtInt, fmtNum, fmtPct, num0 } from '../../lib/format'
 import { ChartCard } from '../../components/ChartCard'
@@ -56,6 +57,7 @@ export default function BowlerPage() {
   const util = useNamedQuery('bowler_utilization', queryParams)
   const yld = useNamedQuery('bowler_yield', queryParams)
   const nps = useFormlabsGet('nps_responses', {}, { staleMs: 10 * 60_000 })
+  const csEmails = useFormlabsGet('cs_emails', { start: queryParams.start, end: queryParams.end }, { staleMs: 10 * 60_000 })
 
   const [plans, setPlans] = useState<Record<string, number | null>>(loadPlans)
   useEffect(() => {
@@ -87,6 +89,28 @@ export default function BowlerPage() {
       }
       return Math.floor(d.getTime() / 1000)
     }
+    // Email response ≤2 business hours, fixed spec: Mon–Fri 07:30–16:00 ET,
+    // Xometry/Formlabs senders, Fin-resolved and human-closed-without-reply
+    // excluded. Same math as the Customer Service view, threshold pinned at 2.
+    const CS_DAYS = new Set([1, 2, 3, 4, 5])
+    const csByPeriod = new Map<string, { emails: number; within: number }>()
+    {
+      const nowMs = Date.now()
+      for (const r of ((csEmails.data?.rows ?? []) as Row[])) {
+        if (r.xometry || r.fin_resolved || r.closed_no_reply) continue
+        if (/@(?:[a-z0-9-]+\.)*formlabs\.com$/i.test(String(r.sender ?? ''))) continue
+        const at = num0(r.email_at) * 1000
+        const period = periodStart(etDate(at), grain)
+        let b = csByPeriod.get(period)
+        if (!b) csByPeriod.set(period, (b = { emails: 0, within: 0 }))
+        b.emails++
+        if (r.replied_at && businessHours(at, num0(r.replied_at) * 1000, CS_DAYS, '07:30', '16:00') <= 2) b.within++
+        else if (!r.replied_at && businessHours(at, nowMs, CS_DAYS, '07:30', '16:00') > 2) {
+          // counted in denominator only — an unanswered email past threshold is a miss
+        }
+      }
+    }
+
     const npsTrailing30 = (period: string): { nps: number | null; n: number } => {
       const end = Math.min(periodEndS(period), Math.floor(Date.now() / 1000))
       const start = end - 30 * 86400
@@ -127,13 +151,13 @@ export default function BowlerPage() {
       },
       {
         key: 'median_days', label: 'Median biz days to ship', kind: 'num', decimals: 0, direction: 'down', defaultPlan: 3, nearBand: 1, filtersApply: true,
-        def: 'Median business days (Mon–Fri) from order to ship, revenue-generating orders only, by actual ship period. Filters apply.',
+        def: 'Median business days (Mon–Fri) from order to ship, revenue-generating orders only, cohorted by the governed DUE date (same period basis as OTS). Unsettled recent cohorts reflect only their already-shipped orders. Filters apply.',
         value: (p) => (mDays.has(p) ? num0(mDays.get(p)!.median_bizdays) : null),
         detail: (p) => (mDays.has(p) ? `${fmtInt(num0(mDays.get(p)!.n_shipped))} orders shipped` : ''),
       },
       {
         key: 'avg_days', label: 'Avg biz days to ship', kind: 'num', decimals: 1, direction: 'down', defaultPlan: null, nearBand: 1, filtersApply: true,
-        def: 'Mean business days (Mon–Fri) from order to ship — same cohort as the median row (revenue-generating, actual ship period). The mean runs above the median when a few very late orders drag it. Filters apply.',
+        def: 'Mean business days (Mon–Fri) from order to ship — same governed due-date cohort as the median row. The mean runs above the median when a few very late orders drag it. Filters apply.',
         value: (p) => (mDays.has(p) ? num0(mDays.get(p)!.avg_bizdays) : null),
         detail: (p) => (mDays.has(p) ? `${fmtInt(num0(mDays.get(p)!.n_shipped))} orders shipped` : ''),
       },
@@ -166,6 +190,18 @@ export default function BowlerPage() {
         detail: counts(mYield, 'parts_shipped', 'parts_attempted', 'attempted'),
       },
       {
+        key: 'cs_2h', label: '% Emails answered ≤2 biz hrs', kind: 'pct', direction: 'up', defaultPlan: 0.8, nearBand: 0.1, filtersApply: false,
+        def: 'Inbound customer emails (Intercom) answered by a human within 2 business hours, counting Mon–Fri 07:30–16:00 ET only. Excludes Xometry and Formlabs senders, Fin-resolved conversations, and emails a teammate closed without replying. Unanswered emails past the threshold count as misses. Fixed spec — the Customer Service page has the adjustable version. Filters do not apply.',
+        value: (p) => {
+          const b = csByPeriod.get(p)
+          return b && b.emails > 0 ? b.within / b.emails : null
+        },
+        detail: (p) => {
+          const b = csByPeriod.get(p)
+          return b ? `${fmtInt(b.within)}/${fmtInt(b.emails)} emails` : ''
+        },
+      },
+      {
         key: 'nps_t30', label: 'NPS — trailing 30d', kind: 'num', decimals: 0, direction: 'up', defaultPlan: 40, nearBand: 10, filtersApply: false,
         def: 'NPS over the 30 days ending at each period\'s close (%promoters − %detractors, rolling window — adjacent columns overlap by design). Hover shows the response count. Filters do not apply.',
         value: (p) => npsTrailing30(p).nps,
@@ -178,7 +214,7 @@ export default function BowlerPage() {
     const periods = [...periodSet].sort()
 
     return { metrics, periods }
-  }, [placed.data, ship.data, days.data, util.data, yld.data, nps.data, grain, queryParams.start, queryParams.end])
+  }, [placed.data, ship.data, days.data, util.data, yld.data, nps.data, csEmails.data, grain, queryParams.start, queryParams.end])
 
   const fmtVal = (m: MetricDef, v: number | null): string => {
     if (v === null) return '—'

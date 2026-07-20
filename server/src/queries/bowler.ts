@@ -1,5 +1,14 @@
 import type { QueryRegistry } from '../registry.js'
-import { T, zBaseFilters, sqlDate, grainExpr, classifiedOrdersCTEs, classifiedChannelFilter, orderPartFilters } from '../sql.js'
+import {
+  T,
+  zBaseFilters,
+  sqlDate,
+  grainExpr,
+  classifiedOrdersCTEs,
+  classifiedChannelFilter,
+  orderPartFilters,
+  governedDueDateExpr,
+} from '../sql.js'
 import { rng, periodsBetween } from '../mock/helpers.js'
 
 // ---------------------------------------------------------------------------
@@ -18,37 +27,40 @@ const GRAIN_SCALE: Record<string, number> = { day: 1 / 7, week: 1, month: 4.3, q
 
 export const bowlerQueries: QueryRegistry = {
   /**
-   * Median business days from order to ship, revenue-generating only, cohorted
-   * by ACTUAL ship period ("Order date = 0" per the owner's sheet). Business
+   * Median/avg business days from order to ship, revenue-generating only,
+   * cohorted by the GOVERNED DUE date (channel-aware) so columns line up with
+   * OTS. Only shipped orders carry a duration, so unsettled recent cohorts
+   * skew toward their faster orders — treat them as provisional. Business
    * days = Mon–Fri; holidays are not excluded (matches the manual sheet's
    * simple day math and keeps the calendar CTE self-contained).
    */
   bowler_ship_days: {
     description:
-      'Median business days (Mon–Fri, holidays not excluded) from order submission to ship, per ACTUAL ship period, revenue-generating orders only (reporting_category not Non-Revenue). Median is computed in SQL per period (a median cannot be re-derived from sums); n = shipped orders in the cohort. Channel/material/mfg filters apply.',
-    source: 'fcm_api_order (+ f_orders classification)',
+      'Median and mean business days (Mon–Fri, holidays not excluded) from order submission to ship, cohorted by the GOVERNED DUE date (channel-aware: Xometry ship_by stored 23:59 ET) — the same period basis as OTS. Revenue-generating orders only. Unshipped due orders carry no duration, so unsettled recent cohorts reflect only their already-shipped (faster) orders. Median computed in SQL per period; n = shipped orders in the cohort. Channel/material/mfg filters apply.',
+    source: 'fcm_api_order (+ f_orders classification, governed due-date rule)',
     params: zBaseFilters,
     sql: (p, ctx) => `
 WITH ${classifiedOrdersCTEs(
-      `o.status = 'SHIPPED' AND o.shipped_at IS NOT NULL AND o.submitted_at IS NOT NULL
-    AND DATE(o.shipped_at) BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}
-    AND DATE(o.shipped_at) <= CURRENT_DATE()`,
+      `o.status = 'SHIPPED' AND o.shipped_at IS NOT NULL AND o.submitted_at IS NOT NULL AND o.ship_by IS NOT NULL
+    AND DATE(o.submitted_at) BETWEEN DATE_SUB(${sqlDate(p.start)}, INTERVAL 90 DAY) AND ${sqlDate(p.end)}`,
       ctx.exclusions.revenueSentinelBillingId,
     )},
 bcal AS (
   SELECT d, ROW_NUMBER() OVER (ORDER BY d) AS idx
-  FROM UNNEST(GENERATE_DATE_ARRAY(DATE_SUB(${sqlDate(p.start)}, INTERVAL 120 DAY), ${sqlDate(p.end)})) AS d
+  FROM UNNEST(GENERATE_DATE_ARRAY(DATE_SUB(${sqlDate(p.start)}, INTERVAL 120 DAY), DATE_ADD(${sqlDate(p.end)}, INTERVAL 30 DAY))) AS d
   WHERE EXTRACT(DAYOFWEEK FROM d) NOT IN (1, 7)
 ),
 base AS (
-  SELECT c.id, c.reporting_category, DATE(c.shipped_at) AS ship_date,
+  SELECT c.id, c.reporting_category, ${governedDueDateExpr('c')} AS due_date,
          bs.idx AS ship_idx, bo.idx AS order_idx
   FROM classified c
   JOIN bcal bs ON bs.d = (SELECT MIN(d) FROM bcal WHERE d >= DATE(c.shipped_at))
   JOIN bcal bo ON bo.d = (SELECT MIN(d) FROM bcal WHERE d >= DATE(c.submitted_at))
   WHERE c.reporting_category NOT LIKE '%Non-Revenue%'
+    AND ${governedDueDateExpr('c')} BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}
+    AND ${governedDueDateExpr('c')} <= CURRENT_DATE()
 )
-SELECT CAST(${grainExpr('ship_date', p.grain)} AS STRING) AS period,
+SELECT CAST(${grainExpr('due_date', p.grain)} AS STRING) AS period,
        COUNT(*) AS n_shipped,
        APPROX_QUANTILES(ship_idx - order_idx, 100)[OFFSET(50)] AS median_bizdays,
        ROUND(AVG(ship_idx - order_idx), 2) AS avg_bizdays
