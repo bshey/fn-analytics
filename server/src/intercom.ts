@@ -67,6 +67,12 @@ interface SearchConversation {
     author?: { type?: string; email?: string }
     subject?: string
   }
+  conversation_rating?: {
+    rating?: number | null
+    remark?: string | null
+    created_at?: number
+    teammate?: { id?: string | number }
+  } | null
 }
 
 interface ConversationPart {
@@ -235,6 +241,51 @@ export async function fetchCsEmails(start: string, end: string): Promise<Row[]> 
     .sort((a, b) => (a.email_at as number) - (b.email_at as number))
 }
 
+/**
+ * Conversation ratings (CSAT) left in [start, end]. Ratings ride on the search
+ * response, so this needs no per-conversation fetches. A new rating bumps the
+ * conversation's updated_at, so searching on updated_at catches ratings left
+ * on old threads; the rating's own created_at does the range filtering.
+ */
+export async function fetchCsRatings(start: string, end: string): Promise<Row[]> {
+  const startTs = Math.floor(new Date(`${start}T00:00:00-05:00`).getTime() / 1000)
+  const endTs = Math.floor(new Date(`${end}T23:59:59-04:00`).getTime() / 1000)
+  const appId = await getAppId()
+
+  const rows: Row[] = []
+  let startingAfter: string | undefined
+  for (let page = 0; page < 40; page++) {
+    const body: Record<string, unknown> = {
+      query: { field: 'updated_at', operator: '>', value: startTs },
+      pagination: { per_page: 150, ...(startingAfter ? { starting_after: startingAfter } : {}) },
+    }
+    const res = await ic<{ conversations: SearchConversation[]; pages?: { next?: { starting_after?: string } } }>(
+      '/conversations/search',
+      body,
+    )
+    for (const c of res.conversations ?? []) {
+      const r = c.conversation_rating
+      if (!r || r.rating === null || r.rating === undefined) continue
+      const ratedAt = r.created_at ?? c.updated_at
+      if (ratedAt < startTs || ratedAt > endTs) continue
+      rows.push({
+        conv_id: c.id,
+        rated_at: ratedAt,
+        rating: r.rating,
+        remark: r.remark ?? '',
+        teammate: r.teammate?.id === undefined ? null : String(r.teammate.id),
+        sender: c.source?.author?.email ?? '',
+        subject: (c.source?.subject ?? '').replace(/<[^>]+>/g, '').trim() || '(no subject)',
+        channel: c.source?.type ?? '',
+        url: appId ? `https://app.intercom.com/a/inbox/${appId}/inbox/conversation/${c.id}` : '',
+      })
+    }
+    startingAfter = res.pages?.next?.starting_after
+    if (!startingAfter) break
+  }
+  return rows.sort((a, b) => (a.rated_at as number) - (b.rated_at as number))
+}
+
 export async function fetchCsAdmins(): Promise<Row[]> {
   const res = await ic<{ admins: { id: string; name: string }[] }>('/admins')
   return (res.admins ?? []).map((a) => ({ id: String(a.id), name: a.name }))
@@ -253,6 +304,32 @@ const MOCK_ADMINS = [
 
 export function mockCsAdmins(): Row[] {
   return MOCK_ADMINS.map((a) => ({ ...a }))
+}
+
+export function mockCsRatings(start: string, end: string): Row[] {
+  const r = rng(`csr:${start}:${end}`)
+  const rows: Row[] = []
+  let id = 7000
+  for (const day of periodsBetween(start, end, 'day')) {
+    const dow = new Date(`${day}T00:00:00Z`).getUTCDay()
+    if (dow === 0 || dow === 6) continue
+    const n = Math.round(r() * 3)
+    for (let i = 0; i < n; i++) {
+      const rating = r() < 0.7 ? 5 : r() < 0.5 ? 4 : r() < 0.5 ? 3 : r() < 0.5 ? 2 : 1
+      rows.push({
+        conv_id: String(id++),
+        rated_at: Math.floor(new Date(`${day}T00:00:00Z`).getTime() / 1000) + 14 * 3600 + Math.round(r() * 6 * 3600),
+        rating,
+        remark: rating <= 2 ? 'Took too long to hear back.' : r() < 0.2 ? 'Great service, thank you!' : '',
+        teammate: MOCK_ADMINS[Math.floor(r() * MOCK_ADMINS.length)].id,
+        sender: `customer${Math.floor(r() * 40)}@example.com`,
+        subject: `Order question #${1000 + Math.floor(r() * 900)}`,
+        channel: 'email',
+        url: '',
+      })
+    }
+  }
+  return rows
 }
 
 export function mockCsEmails(start: string, end: string): Row[] {

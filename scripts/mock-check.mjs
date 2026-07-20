@@ -50,6 +50,7 @@ const CASES = [
 const GET_CASES = [
   'cs_admins',
   'cs_emails?start=2026-06-15&end=2026-07-08',
+  'cs_ratings?start=2026-06-15&end=2026-07-08',
   'printer_queues',
   'printer_group_materials?group=Billerica%20Fuse%201%2B',
   'printer_group_materials?group=Billerica%20F4',

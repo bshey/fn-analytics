@@ -20,6 +20,14 @@ interface CsItem extends Row {
   bh_hours: number
 }
 
+const SCORE_COLORS: Record<number, string> = {
+  1: '#B2182B',
+  2: STATUS.serious,
+  3: STATUS.warning,
+  4: '#8fce8f',
+  5: STATUS.good,
+}
+
 // ---------------------------------------------------------------------------
 // Business-hours math in America/New_York. The two-offset trick turns an ET
 // wall time into an exact epoch across DST without a timezone library.
@@ -425,6 +433,220 @@ export default function CsPage() {
           </p>
         </Modal>
       )}
+      <CsatCard adminsById={new Map(adminOptions.map((a) => [a.value, a.label]))} />
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// CSAT — conversation ratings from the "rate your conversation" workflow.
+// ---------------------------------------------------------------------------
+
+function CsatCard({ adminsById }: { adminsById: Map<string, string> }) {
+  const { filters, queryParams } = useFilters()
+  const grain = filters.grain
+  const chartRef = useRef<EChartHandle>(null)
+  const [mode, setMode] = useState<'counts' | 'avg'>('counts')
+  const [modalPeriod, setModalPeriod] = useState<string | null>(null)
+
+  const q = useFormlabsGet('cs_ratings', { start: queryParams.start, end: queryParams.end }, { staleMs: 10 * 60_000 })
+
+  const model = useMemo(() => {
+    const rows = (q.data?.rows ?? []) as Row[]
+    interface Bucket {
+      byScore: number[]
+      sum: number
+      n: number
+      items: Row[]
+    }
+    const byPeriod = new Map<string, Bucket>()
+    let sum = 0
+    let promoters = 0
+    let remarks = 0
+    for (const r of rows) {
+      const period = periodStart(etDate(num0(r.rated_at) * 1000), grain)
+      let b = byPeriod.get(period)
+      if (!b) byPeriod.set(period, (b = { byScore: [0, 0, 0, 0, 0, 0], sum: 0, n: 0, items: [] }))
+      const score = Math.min(5, Math.max(1, num0(r.rating)))
+      b.byScore[score]++
+      b.sum += score
+      b.n++
+      b.items.push(r)
+      sum += score
+      if (score >= 4) promoters++
+      if (String(r.remark ?? '').trim()) remarks++
+    }
+    const periods = [...byPeriod.keys()].sort()
+    const provisional = periods.map((p) => isCurrentPeriod(p, grain))
+    const total = rows.length
+
+    const series =
+      mode === 'counts'
+        ? [5, 4, 3, 2, 1]
+            .filter((s) => periods.some((p) => byPeriod.get(p)!.byScore[s] > 0))
+            .map((s) => ({
+              ...barDefaults,
+              stack: 'ratings',
+              name: `${s}★`,
+              color: SCORE_COLORS[s],
+              data: periods.map((p, i) => ({
+                value: byPeriod.get(p)!.byScore[s],
+                itemStyle: provisional[i] ? { opacity: 0.45 } : undefined,
+              })),
+            }))
+        : [
+            {
+              type: 'line' as const,
+              symbol: 'circle' as const,
+              symbolSize: 7,
+              lineStyle: { width: 2 },
+              name: 'Avg rating',
+              color: STATUS.good,
+              connectNulls: false,
+              data: periods.map((p, i) => {
+                const b = byPeriod.get(p)!
+                const v = b.n > 0 ? Math.round((b.sum / b.n) * 100) / 100 : null
+                return provisional[i] && v !== null ? { value: v, itemStyle: { opacity: 0.45 } } : v
+              }),
+            },
+          ]
+
+    const option: Record<string, unknown> = {
+      grid: gridDefaults,
+      legend: { show: mode === 'counts', top: 0 },
+      tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+      xAxis: { type: 'category', data: periods.map((p) => periodLabel(p, grain)) },
+      yAxis:
+        mode === 'avg'
+          ? { type: 'value', min: 1, max: 5 }
+          : { type: 'value', min: 0, axisLabel: { formatter: (v: number) => fmtInt(v) } },
+      series,
+    }
+
+    const csvRows = periods.map((p) => {
+      const b = byPeriod.get(p)!
+      return {
+        period: p,
+        ratings: b.n,
+        avg: b.n ? Math.round((b.sum / b.n) * 100) / 100 : null,
+        r1: b.byScore[1],
+        r2: b.byScore[2],
+        r3: b.byScore[3],
+        r4: b.byScore[4],
+        r5: b.byScore[5],
+      }
+    })
+
+    return {
+      option,
+      csvRows,
+      periods,
+      itemsByPeriod: new Map(periods.map((p) => [p, byPeriod.get(p)!.items])),
+      total,
+      avg: total ? Math.round((sum / total) * 100) / 100 : null,
+      csat: total ? promoters / total : null,
+      remarks,
+      isEmpty: total === 0,
+    }
+  }, [q.data, grain, mode])
+
+  const modalItems = modalPeriod ? (model.itemsByPeriod.get(modalPeriod) ?? []) : []
+  const modalColumns: ColumnDef<Row, unknown>[] = [
+    {
+      header: 'Rated (ET)',
+      id: 'rated_at',
+      accessorFn: (r) => num0(r.rated_at),
+      cell: ({ row }) => fmtDateTime(new Date(num0(row.original.rated_at) * 1000).toISOString()),
+    },
+    {
+      header: 'Score',
+      id: 'rating',
+      accessorFn: (r) => num0(r.rating),
+      cell: ({ row }) => {
+        const s = num0(row.original.rating)
+        return (
+          <span className="rounded px-1.5 py-0.5 text-[11px] font-semibold text-white" style={{ backgroundColor: SCORE_COLORS[s] ?? '#898781' }}>
+            {s}★
+          </span>
+        )
+      },
+      meta: { align: 'right' },
+    },
+    { header: 'Teammate', id: 'teammate', accessorFn: (r) => String(r.teammate ?? ''), cell: ({ row }) => adminsById.get(String(row.original.teammate)) ?? '—' },
+    { header: 'Sender', accessorKey: 'sender', cell: ({ row }) => String(row.original.sender || '—') },
+    {
+      header: 'Remark',
+      accessorKey: 'remark',
+      cell: ({ row }) => {
+        const v = String(row.original.remark ?? '').trim()
+        return v ? <span className="block max-w-[22rem] truncate" title={v}>{v}</span> : <span className="text-faint">—</span>
+      },
+    },
+    {
+      header: '',
+      id: 'open',
+      cell: ({ row }) =>
+        row.original.url ? (
+          <a href={String(row.original.url)} target="_blank" rel="noreferrer" className="text-[12px] font-medium text-accent hover:underline">
+            Intercom ↗
+          </a>
+        ) : null,
+    },
+  ]
+
+  return (
+    <ChartCard
+      title="CSAT — conversation ratings"
+      subtitle="Ratings left after teammates close a conversation (workflow live since Jul 20, 2026)"
+      info={{
+        definition:
+          'Conversation ratings (1–5) collected by the "rate your conversation" workflow, bucketed by when the rating was left. Counts view stacks ratings by score; Avg view plots the mean per period. CSAT in the caption = share of 4–5 ratings, the standard definition. All channels are included, and ratings are attributed to the teammate Intercom credits (usually the closer). Ratings only exist where customers respond — expect small n at first; the workflow went live Jul 20, 2026, so earlier periods are legitimately empty. Click a bar for individual ratings including remarks. The global date range and grain apply.',
+        source: q.data?.meta.source ?? 'Intercom API (api.intercom.io)',
+      }}
+      csvRows={model.csvRows}
+      csvName="cs-csat"
+      chartRef={chartRef}
+      isLoading={q.isLoading}
+      isFetching={q.isFetching}
+      error={q.error}
+      height={340}
+      actions={
+        <Segmented
+          size="sm"
+          options={[
+            { value: 'counts', label: 'Counts' },
+            { value: 'avg', label: 'Avg score' },
+          ]}
+          value={mode}
+          onChange={setMode}
+        />
+      }
+    >
+      {model.isEmpty ? (
+        <EmptyState text="No ratings in this range yet — the CSAT workflow is newly live; responses will appear here as customers reply." />
+      ) : (
+        <>
+          <EChart
+            ref={chartRef}
+            option={model.option}
+            height={260}
+            onClick={(params) => {
+              const idx = (params as { dataIndex?: number }).dataIndex
+              if (idx !== undefined && model.periods[idx]) setModalPeriod(model.periods[idx])
+            }}
+          />
+          <p className="mt-1 text-[11.5px] text-faint">
+            Click a bar for individual ratings. Window: {fmtInt(model.total)} rating{model.total === 1 ? '' : 's'} · avg{' '}
+            {model.avg ?? '—'} · CSAT (4–5 share) {model.csat !== null ? fmtPct(model.csat) : '—'} · {fmtInt(model.remarks)} with
+            remarks.
+          </p>
+        </>
+      )}
+      {modalPeriod && (
+        <Modal title={`Ratings — ${periodLabel(modalPeriod, grain)} (${fmtInt(modalItems.length)})`} onClose={() => setModalPeriod(null)}>
+          <DataTable data={modalItems} columns={modalColumns} initialSort={[{ id: 'rated_at', desc: false }]} csvName={`cs-ratings-${modalPeriod}`} fit />
+        </Modal>
+      )}
+    </ChartCard>
   )
 }

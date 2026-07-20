@@ -8,7 +8,16 @@ import { registry } from './queries/index.js'
 import { mapMaterialRows } from './queries/dims.js'
 import type { Row } from './registry.js'
 import { CHANNELS, MFG_TYPES } from './sql.js'
-import { IntercomError, fetchCsAdmins, fetchCsEmails, hasIntercomCreds, mockCsAdmins, mockCsEmails } from './intercom.js'
+import {
+  IntercomError,
+  fetchCsAdmins,
+  fetchCsEmails,
+  fetchCsRatings,
+  hasIntercomCreds,
+  mockCsAdmins,
+  mockCsEmails,
+  mockCsRatings,
+} from './intercom.js'
 import {
   BILLERICA_GROUPS,
   FormlabsError,
@@ -214,6 +223,21 @@ app.get('/api/cs_emails', (req, res, next) => {
     900,
     () => fetchCsEmails(start, end),
     () => mockCsEmails(start, end),
+  )(req, res, next)
+})
+
+app.get('/api/cs_ratings', (req, res, next) => {
+  const start = String(req.query.start ?? '')
+  const end = String(req.query.end ?? '')
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end) || start > end) {
+    res.status(400).json({ error: 'Expected start/end (YYYY-MM-DD)' })
+    return
+  }
+  intercomRoute(
+    `cs_ratings:${start}:${end}`,
+    900,
+    () => fetchCsRatings(start, end),
+    () => mockCsRatings(start, end),
   )(req, res, next)
 })
 
