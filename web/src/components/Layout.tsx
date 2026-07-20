@@ -89,7 +89,8 @@ export function Layout() {
       </aside>
 
       <div className="ml-52 flex min-w-0 flex-1 flex-col">
-        <div className="sticky top-0 z-10">
+        {/* z-30: filter dropdowns must paint above sticky table cells (z-10). */}
+        <div className="sticky top-0 z-30">
           {health.data?.mock && (
             <div className="bg-amber-400 px-5 py-1.5 text-center text-[12.5px] font-semibold text-black">
               DEMO DATA — server is running in mock mode (MOCK=1); every number on every page is synthetic.

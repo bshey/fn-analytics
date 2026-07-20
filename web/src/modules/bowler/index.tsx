@@ -304,14 +304,29 @@ export default function BowlerPage() {
                     const bg = cellColor(m, v)
                     const provisional = isCurrentPeriod(p, grain)
                     const detail = m.detail?.(p)
+                    const csRow = m.key === 'cs_2h'
+                    const display =
+                      v === null && csRow && csEmails.isLoading
+                        ? '…'
+                        : v === null && csRow && csEmails.error
+                          ? '!'
+                          : fmtVal(m, v)
+                    const cellTitle =
+                      v === null && csRow && csEmails.isLoading
+                        ? 'Loading Intercom threads — first load of a new range takes a minute or two'
+                        : v === null && csRow && csEmails.error
+                          ? `Intercom fetch failed: ${csEmails.error.message}`
+                          : detail || undefined
                     return (
                       <td
                         key={p}
-                        className={`whitespace-nowrap border-r border-line/70 px-3 py-2 text-center tabular-nums last:border-r-0 ${provisional ? 'opacity-60' : ''}`}
+                        className={`whitespace-nowrap border-r border-line/70 px-3 py-2 text-center tabular-nums last:border-r-0 ${provisional ? 'opacity-60' : ''} ${
+                          v === null && csRow && csEmails.isLoading ? 'text-faint' : ''
+                        }`}
                         style={bg ? { backgroundColor: bg } : undefined}
-                        title={detail || undefined}
+                        title={cellTitle}
                       >
-                        {fmtVal(m, v)}
+                        {display}
                       </td>
                     )
                   })}
@@ -326,6 +341,15 @@ export default function BowlerPage() {
           ◦ = global filters don't apply to that row. Newest period is provisional (faded). Plans are stored in this
           browser; percent plans are entered as whole numbers (90 = 90%).
         </p>
+        {csEmails.isLoading && (
+          <p>Email row is loading Intercom threads — the first load of a new date range takes a minute or two.</p>
+        )}
+        {csEmails.error && (
+          <p className="rounded-md border border-warn/30 bg-amber-50 px-2 py-1 text-warn">
+            Email row failed to load: {csEmails.error.message}
+            {csEmails.error.hint ? ` — ${csEmails.error.hint}` : ''}
+          </p>
+        )}
       </div>
     </ChartCard>
   )
