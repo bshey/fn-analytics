@@ -17,6 +17,8 @@ export const config = {
   // Formlabs Dashboard API (OAuth client credentials; FORMLABS_API_TOKEN is the client SECRET).
   formlabsClientId: process.env.FORMLABS_API_CLIENT_ID ?? '',
   formlabsClientSecret: process.env.FORMLABS_API_TOKEN ?? '',
+  // Intercom REST access token (Customer Service view).
+  intercomToken: process.env.INTERCOM_ACCESS_TOKEN ?? '',
   port: Number(process.env.PORT ?? 4600),
   mock: process.env.MOCK === '1',
   isProd: process.env.NODE_ENV === 'production',

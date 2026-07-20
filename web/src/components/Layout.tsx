@@ -29,6 +29,11 @@ const NAV = [
     label: 'Ship Predictor',
     icon: <path d="M8 2v3M8 5a5 5 0 1 0 5 5M13 3l-5 7" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />,
   },
+  {
+    to: '/cs',
+    label: 'Customer Service',
+    icon: <path d="M2 3h12v8H8l-3 3v-3H2zM5 6.5h6M5 8.5h4" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinecap="round" strokeLinejoin="round" />,
+  },
 ]
 
 export function Layout() {

@@ -8,6 +8,7 @@ import { registry } from './queries/index.js'
 import { mapMaterialRows } from './queries/dims.js'
 import type { Row } from './registry.js'
 import { CHANNELS, MFG_TYPES } from './sql.js'
+import { IntercomError, fetchCsAdmins, fetchCsEmails, hasIntercomCreds, mockCsAdmins, mockCsEmails } from './intercom.js'
 import {
   BILLERICA_GROUPS,
   FormlabsError,
@@ -164,6 +165,57 @@ function formlabsRoute(name: string, ttlSeconds: number, live: () => Promise<Row
     }
   }
 }
+
+/** Intercom-backed Customer Service endpoints — same envelope, same caching pattern. */
+function intercomRoute(name: string, ttlSeconds: number, live: () => Promise<Row[]>, mock: () => Row[]): express.RequestHandler {
+  return async (req, res) => {
+    try {
+      const meta = { name, source: 'Intercom API (api.intercom.io)', description: '', cached: false, retrievedAt: new Date().toISOString() }
+      if (config.mock) {
+        res.json({ rows: mock(), meta: { ...meta, mock: true } })
+        return
+      }
+      if (!hasIntercomCreds()) {
+        res.status(503).json({ error: 'Intercom access token not configured', hint: 'Set INTERCOM_ACCESS_TOKEN in .env.' })
+        return
+      }
+      const key = `intercom:${name}`
+      if (req.query.refresh !== '1') {
+        const hit = cacheGet<{ rows: Row[]; retrievedAt: string }>(key)
+        if (hit) {
+          res.json({ rows: hit.rows, meta: { ...meta, mock: false, cached: true, retrievedAt: hit.retrievedAt } })
+          return
+        }
+      }
+      const rows = await live()
+      cacheSet(key, { rows, retrievedAt: meta.retrievedAt }, ttlSeconds)
+      res.json({ rows, meta: { ...meta, mock: false } })
+    } catch (e) {
+      if (e instanceof IntercomError) {
+        res.status(e.status).json({ error: e.message, hint: e.hint })
+        return
+      }
+      handleError(res, e)
+    }
+  }
+}
+
+app.get('/api/cs_admins', intercomRoute('cs_admins', 3600, fetchCsAdmins, mockCsAdmins))
+
+app.get('/api/cs_emails', (req, res, next) => {
+  const start = String(req.query.start ?? '')
+  const end = String(req.query.end ?? '')
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end) || start > end) {
+    res.status(400).json({ error: 'Expected start/end (YYYY-MM-DD)' })
+    return
+  }
+  intercomRoute(
+    `cs_emails:${start}:${end}`,
+    900,
+    () => fetchCsEmails(start, end),
+    () => mockCsEmails(start, end),
+  )(req, res, next)
+})
 
 app.get('/api/printer_queues', formlabsRoute('printer_queues', 180, fetchPrinterQueues, mockPrinterQueues))
 
