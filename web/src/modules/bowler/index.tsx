@@ -58,6 +58,8 @@ export default function BowlerPage() {
   const yld = useNamedQuery('bowler_yield', queryParams)
   const nps = useFormlabsGet('nps_responses', {}, { staleMs: 10 * 60_000 })
   const csEmails = useFormlabsGet('cs_emails', { start: queryParams.start, end: queryParams.end }, { staleMs: 10 * 60_000 })
+  const rmaDenom = useNamedQuery('bowler_rma', queryParams)
+  const rmaTickets = useFormlabsGet('rma_tickets', { start: queryParams.start, end: queryParams.end }, { staleMs: 10 * 60_000 })
 
   const [plans, setPlans] = useState<Record<string, number | null>>(loadPlans)
   useEffect(() => {
@@ -75,6 +77,12 @@ export default function BowlerPage() {
     const mDays = toMap(days.data?.rows)
     const mUtil = toMap(util.data?.rows)
     const mYield = toMap(yld.data?.rows)
+    const mRmaDenom = toMap(rmaDenom.data?.rows)
+    const rmaTicketsByPeriod = new Map<string, number>()
+    for (const t of ((rmaTickets.data?.rows ?? []) as Row[])) {
+      const period = periodStart(new Date(num0(t.created_at) * 1000).toISOString().slice(0, 10), grain)
+      rmaTicketsByPeriod.set(period, (rmaTicketsByPeriod.get(period) ?? 0) + 1)
+    }
 
     // NPS: trailing 30 days ending at each period's end (rolling window).
     const npsRows = ((nps.data?.rows ?? []) as Row[]).slice().sort((a, b) => num0(a.recorded_at) - num0(b.recorded_at))
@@ -190,6 +198,16 @@ export default function BowlerPage() {
         detail: counts(mYield, 'parts_shipped', 'parts_attempted', 'attempted'),
       },
       {
+        key: 'rma_orders', label: 'RMA % (orders)', kind: 'pct', direction: 'down', defaultPlan: 0.03, nearBand: 0.01, filtersApply: false,
+        def: 'Customer-facing RMA tickets (Intercom "Form Now RMA" + "Xometry RMA") created in the period ÷ orders shipped that period (actual ship date). Order-level — tickets carry no part quantities. The ticket types ramped up early 2026, so Jan–Mar read low. See the RMA tab for the full picture. Filters do not apply.',
+        value: (p) => {
+          const orders = num0(mRmaDenom.get(p)?.orders_shipped)
+          const t = rmaTicketsByPeriod.get(p) ?? 0
+          return orders > 0 ? t / orders : null
+        },
+        detail: (p) => `${fmtInt(rmaTicketsByPeriod.get(p) ?? 0)}/${fmtInt(num0(mRmaDenom.get(p)?.orders_shipped))} orders`,
+      },
+      {
         key: 'cs_2h', label: '% Emails answered ≤2 biz hrs', kind: 'pct', direction: 'up', defaultPlan: 0.8, nearBand: 0.1, filtersApply: false,
         def: 'Inbound customer emails (Intercom) answered by a human within 2 business hours, counting Mon–Fri 07:30–16:00 ET only. Excludes Xometry and Formlabs senders, Fin-resolved conversations, and emails a teammate closed without replying. Unanswered emails past the threshold count as misses. Fixed spec — the Customer Service page has the adjustable version. Filters do not apply.',
         value: (p) => {
@@ -214,7 +232,7 @@ export default function BowlerPage() {
     const periods = [...periodSet].sort()
 
     return { metrics, periods }
-  }, [placed.data, ship.data, days.data, util.data, yld.data, nps.data, csEmails.data, grain, queryParams.start, queryParams.end])
+  }, [placed.data, ship.data, days.data, util.data, yld.data, nps.data, csEmails.data, rmaDenom.data, rmaTickets.data, grain, queryParams.start, queryParams.end])
 
   const fmtVal = (m: MetricDef, v: number | null): string => {
     if (v === null) return '—'

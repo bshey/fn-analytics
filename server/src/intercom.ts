@@ -286,6 +286,93 @@ export async function fetchCsRatings(start: string, end: string): Promise<Row[]>
   return rows.sort((a, b) => (a.rated_at as number) - (b.rated_at as number))
 }
 
+/**
+ * Customer-facing RMA tickets ("Form Now RMA" + "Xometry RMA" ticket types).
+ * These are the RMA source that KEPT flowing after the back-office "RMA
+ * Submission" form (which fed fcm_api_rmapart with part quantities) lapsed on
+ * 2026-06-23. Tickets carry origin/RMA order ids but NO part quantities, so
+ * the honest continuing unit is orders-with-an-RMA. Coverage note: these
+ * types ramped up in early 2026 — Jan–Mar undercount vs the back-office form.
+ */
+const RMA_TICKET_TYPES = [
+  { id: 2991363, label: 'Form Now' },
+  { id: 2949414, label: 'Xometry' },
+]
+
+interface RmaTicket {
+  id: string
+  created_at: number
+  open: boolean
+  ticket_attributes?: Record<string, unknown>
+}
+
+export async function fetchRmaTickets(start: string, end: string): Promise<Row[]> {
+  const startTs = Math.floor(new Date(`${start}T00:00:00-05:00`).getTime() / 1000)
+  const endTs = Math.floor(new Date(`${end}T23:59:59-04:00`).getTime() / 1000)
+  const appId = await getAppId()
+  const rows: Row[] = []
+  for (const type of RMA_TICKET_TYPES) {
+    let startingAfter: string | undefined
+    for (let page = 0; page < 20; page++) {
+      const body: Record<string, unknown> = {
+        query: {
+          operator: 'AND',
+          value: [
+            { field: 'ticket_type_id', operator: '=', value: type.id },
+            { field: 'created_at', operator: '>', value: startTs - 1 },
+            { field: 'created_at', operator: '<', value: endTs + 1 },
+          ],
+        },
+        pagination: { per_page: 150, ...(startingAfter ? { starting_after: startingAfter } : {}) },
+      }
+      const res = await ic<{ tickets: RmaTicket[]; pages?: { next?: { starting_after?: string } } }>('/tickets/search', body)
+      for (const t of res.tickets ?? []) {
+        const a = t.ticket_attributes ?? {}
+        const originId = Number(a['Origin Job Internal ID'])
+        const rmaId = Number(a['RMA Job Internal ID'])
+        rows.push({
+          ticket_id: String(t.id),
+          rma_type: type.label,
+          created_at: t.created_at,
+          state: t.open ? 'open' : 'closed',
+          title: String(a['_default_title_'] ?? '').trim(),
+          origin_order_id: Number.isFinite(originId) && originId > 0 ? originId : null,
+          rma_order_id: Number.isFinite(rmaId) && rmaId > 0 ? rmaId : null,
+          url: appId ? `https://app.intercom.com/a/inbox/${appId}/inbox/conversation/${t.id}` : '',
+        })
+      }
+      startingAfter = res.pages?.next?.starting_after
+      if (!startingAfter) break
+    }
+  }
+  return rows.sort((a, b) => (b.created_at as number) - (a.created_at as number))
+}
+
+export function mockRmaTickets(start: string, end: string): Row[] {
+  const r = rng(`rmat:${start}:${end}`)
+  const rows: Row[] = []
+  let id = 5000
+  for (const day of periodsBetween(start, end, 'day')) {
+    const dow = new Date(`${day}T00:00:00Z`).getUTCDay()
+    if (dow === 0 || dow === 6 || r() < 0.55) continue
+    const n = 1 + Math.round(r())
+    for (let i = 0; i < n; i++) {
+      rows.push({
+        ticket_id: String(id),
+        rma_type: r() < 0.5 ? 'Form Now' : 'Xometry',
+        created_at: Math.floor(new Date(`${day}T00:00:00Z`).getTime() / 1000) + 14 * 3600 + Math.round(r() * 6 * 3600),
+        state: r() < 0.6 ? 'closed' : 'open',
+        title: `Part quality issue — order ${17000 + id - 5000}`,
+        origin_order_id: 17000 + id - 5000,
+        rma_order_id: r() < 0.7 ? 21000 + id - 5000 : null,
+        url: '',
+      })
+      id++
+    }
+  }
+  return rows
+}
+
 export async function fetchCsAdmins(): Promise<Row[]> {
   const res = await ic<{ admins: { id: string; name: string }[] }>('/admins')
   return (res.admins ?? []).map((a) => ({ id: String(a.id), name: a.name }))

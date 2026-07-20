@@ -178,7 +178,8 @@ WITH rma AS (
 ),
 shipped AS (
   SELECT CAST(${grainExpr('DATE(o.shipped_at)', p.grain)} AS STRING) AS period,
-         SUM(op.quantity_shipped) AS parts_shipped
+         SUM(op.quantity_shipped) AS parts_shipped,
+         COUNT(DISTINCT o.id) AS orders_shipped
   FROM ${T.orderPart} op
   JOIN ${T.order} o ON o.id = op.order_id
   WHERE o.shipped_at IS NOT NULL
@@ -190,7 +191,8 @@ SELECT COALESCE(r.period, s.period) AS period,
        IFNULL(r.claims, 0) AS claims,
        IFNULL(r.rma_parts, 0) AS rma_parts,
        IFNULL(r.rma_parts_scored, 0) AS rma_parts_scored,
-       IFNULL(s.parts_shipped, 0) AS parts_shipped
+       IFNULL(s.parts_shipped, 0) AS parts_shipped,
+       IFNULL(s.orders_shipped, 0) AS orders_shipped
 FROM rma r
 FULL OUTER JOIN shipped s ON s.period = r.period
 ORDER BY period`,
@@ -199,7 +201,14 @@ ORDER BY period`,
       return periodsBetween(p.start, p.end, p.grain).map((period) => {
         const shipped = Math.max(100, Math.round((4500 + r() * 3000) * (GRAIN_SCALE[p.grain] ?? 1)))
         const scored = Math.round(shipped * r() * 0.02)
-        return { period, claims: Math.max(0, Math.round(scored / 5)), rma_parts: Math.round(scored * 1.3), rma_parts_scored: scored, parts_shipped: shipped }
+        return {
+          period,
+          claims: Math.max(0, Math.round(scored / 5)),
+          rma_parts: Math.round(scored * 1.3),
+          rma_parts_scored: scored,
+          parts_shipped: shipped,
+          orders_shipped: Math.max(20, Math.round(shipped / 25)),
+        }
       })
     },
   },

@@ -35,6 +35,11 @@ const NAV = [
     icon: <path d="M8 2.5l1.7 3.6 3.8.5-2.8 2.7.7 3.9L8 11.3l-3.4 1.9.7-3.9-2.8-2.7 3.8-.5z" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinejoin="round" />,
   },
   {
+    to: '/rma',
+    label: 'RMA',
+    icon: <path d="M13 6.5A5 5 0 1 0 12 10M13 3v3.5H9.5" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />,
+  },
+  {
     to: '/bowler',
     label: 'Bowler Chart',
     icon: <path d="M2 3h12M2 3v9h12V3M5 5.5h2M5 8h2M9 5.5h4M9 8h4M9 10.5h4" stroke="currentColor" strokeWidth="1.2" fill="none" strokeLinecap="round" />,

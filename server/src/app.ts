@@ -15,9 +15,11 @@ import {
   fetchCsEmails,
   fetchCsRatings,
   hasIntercomCreds,
+  fetchRmaTickets,
   mockCsAdmins,
   mockCsEmails,
   mockCsRatings,
+  mockRmaTickets,
 } from './intercom.js'
 import {
   BILLERICA_GROUPS,
@@ -239,6 +241,21 @@ app.get('/api/cs_ratings', (req, res, next) => {
     900,
     () => fetchCsRatings(start, end),
     () => mockCsRatings(start, end),
+  )(req, res, next)
+})
+
+app.get('/api/rma_tickets', (req, res, next) => {
+  const start = String(req.query.start ?? '')
+  const end = String(req.query.end ?? '')
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(start) || !/^\d{4}-\d{2}-\d{2}$/.test(end) || start > end) {
+    res.status(400).json({ error: 'Expected start/end (YYYY-MM-DD)' })
+    return
+  }
+  intercomRoute(
+    `rma_tickets:${start}:${end}`,
+    900,
+    () => fetchRmaTickets(start, end),
+    () => mockRmaTickets(start, end),
   )(req, res, next)
 })
 
