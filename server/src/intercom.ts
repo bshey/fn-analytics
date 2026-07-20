@@ -15,6 +15,8 @@
  * re-fetch conversations that actually changed.
  */
 import { config } from './config.js'
+import { runRedashQuery } from './redash.js'
+import { T } from './sql.js'
 import type { Row } from './registry.js'
 import { rng, periodsBetween } from './mock/helpers.js'
 
@@ -308,7 +310,13 @@ interface RmaTicket {
 
 export async function fetchRmaTickets(start: string, end: string): Promise<Row[]> {
   const startTs = Math.floor(new Date(`${start}T00:00:00-05:00`).getTime() / 1000)
-  const endTs = Math.floor(new Date(`${end}T23:59:59-04:00`).getTime() / 1000)
+  // RMAs are SHIP-DATE cohorted downstream: a ticket for an order shipped in
+  // the window can be filed weeks later, so the ticket search extends 45 days
+  // past the window (median ship→RMA lag is 8 days, p90 20).
+  const endTs = Math.min(
+    Math.floor(Date.now() / 1000),
+    Math.floor(new Date(`${end}T23:59:59-04:00`).getTime() / 1000) + 45 * 86400,
+  )
   const appId = await getAppId()
   const rows: Row[] = []
   for (const type of RMA_TICKET_TYPES) {
@@ -345,6 +353,20 @@ export async function fetchRmaTickets(start: string, end: string): Promise<Row[]
       if (!startingAfter) break
     }
   }
+  // Resolve origin orders' ship dates for cohorting (degrades without VPN).
+  const ids = [...new Set(rows.map((r) => r.origin_order_id).filter((v): v is number => typeof v === 'number'))]
+  if (ids.length) {
+    try {
+      const res = await runRedashQuery(
+        `SELECT id, CAST(DATE(shipped_at) AS STRING) AS ship_date FROM ${T.order} WHERE id IN (${ids.join(', ')}) AND shipped_at IS NOT NULL`,
+        { maxAge: 3600 },
+      )
+      const shipDates = new Map(res.rows.map((r) => [Number(r.id), String(r.ship_date)]))
+      for (const r of rows) r.origin_shipped_at = shipDates.get(r.origin_order_id as number) ?? null
+    } catch {
+      for (const r of rows) r.origin_shipped_at = null
+    }
+  }
   return rows.sort((a, b) => (b.created_at as number) - (a.created_at as number))
 }
 
@@ -357,13 +379,15 @@ export function mockRmaTickets(start: string, end: string): Row[] {
     if (dow === 0 || dow === 6 || r() < 0.55) continue
     const n = 1 + Math.round(r())
     for (let i = 0; i < n; i++) {
+      const createdAt = Math.floor(new Date(`${day}T00:00:00Z`).getTime() / 1000) + 14 * 3600 + Math.round(r() * 6 * 3600)
       rows.push({
         ticket_id: String(id),
         rma_type: r() < 0.5 ? 'Form Now' : 'Xometry',
-        created_at: Math.floor(new Date(`${day}T00:00:00Z`).getTime() / 1000) + 14 * 3600 + Math.round(r() * 6 * 3600),
+        created_at: createdAt,
         state: r() < 0.6 ? 'closed' : 'open',
         title: `Part quality issue — order ${17000 + id - 5000}`,
         origin_order_id: 17000 + id - 5000,
+        origin_shipped_at: new Date((createdAt - Math.round((2 + r() * 14) * 86400)) * 1000).toISOString().slice(0, 10),
         rma_order_id: r() < 0.7 ? 21000 + id - 5000 : null,
         url: '',
       })

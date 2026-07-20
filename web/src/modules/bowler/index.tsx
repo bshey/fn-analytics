@@ -78,9 +78,12 @@ export default function BowlerPage() {
     const mUtil = toMap(util.data?.rows)
     const mYield = toMap(yld.data?.rows)
     const mRmaDenom = toMap(rmaDenom.data?.rows)
+    // Ship-date cohort: tickets attribute to the period their origin order
+    // shipped; tickets without a resolvable shipped origin are excluded.
     const rmaTicketsByPeriod = new Map<string, number>()
     for (const t of ((rmaTickets.data?.rows ?? []) as Row[])) {
-      const period = periodStart(new Date(num0(t.created_at) * 1000).toISOString().slice(0, 10), grain)
+      if (!t.origin_shipped_at) continue
+      const period = periodStart(String(t.origin_shipped_at).slice(0, 10), grain)
       rmaTicketsByPeriod.set(period, (rmaTicketsByPeriod.get(period) ?? 0) + 1)
     }
 
@@ -199,7 +202,7 @@ export default function BowlerPage() {
       },
       {
         key: 'rma_orders', label: 'RMA % (orders)', kind: 'pct', direction: 'down', defaultPlan: 0.03, nearBand: 0.01, filtersApply: false,
-        def: 'Customer-facing RMA tickets (Intercom "Form Now RMA" + "Xometry RMA") created in the period ÷ orders shipped that period (actual ship date). Order-level — tickets carry no part quantities. The ticket types ramped up early 2026, so Jan–Mar read low. See the RMA tab for the full picture. Filters do not apply.',
+        def: 'Ship-date cohort: customer-facing RMA tickets (Intercom "Form Now RMA" + "Xometry RMA") attributed to the period their origin order SHIPPED ÷ orders shipped that period — of orders shipped this period, how many came back. Cohorts younger than ~3 weeks are still accumulating (ship→RMA lag 8d median, p90 20d). Order-level — tickets carry no part quantities; ticket types ramped up early 2026, so Jan–Mar read low. See the RMA tab for the full picture. Filters do not apply.',
         value: (p) => {
           const orders = num0(mRmaDenom.get(p)?.orders_shipped)
           const t = rmaTicketsByPeriod.get(p) ?? 0

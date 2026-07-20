@@ -158,22 +158,25 @@ ORDER BY period`,
   },
 
   /**
-   * RMA inputs: rejected parts by rejection period vs parts shipped by ACTUAL
-   * ship period (not the due-date-keyed KPI view — up to 2x off per week).
+   * RMA inputs, SHIP-DATE COHORTED (owner decision): claims attribute to the
+   * period their ORIGIN ORDER shipped, not when the claim was filed, so the
+   * numerator and denominator describe the same population of orders.
    */
   bowler_rma: {
     description:
-      "RMA inputs per period: rma_parts_scored = SUM(failed_quantity) of claims with is_counted_in_score (Form Now's own quality-score filter — excludes contested claims incl. a 300-part outlier), rma_parts = unfiltered, claims = claim count, all by rejection date; parts_shipped = SUM(orderpart.quantity_shipped) by actual ship date. Rate derived client-side as scored ÷ shipped. Median ship→claim lag is 8 days (p90 20), so the trailing ~3 weeks always read low. DATA-ENTRY WATCH: zero claims logged since 2026-06-23 despite normal ship volume — verify RMA entry hasn't lapsed before trusting recent zeros. Global filters do NOT apply.",
-    source: 'fcm_api_rmapart + fcm_api_order/orderpart (actual ship date)',
+      "RMA inputs per period, cohorted by the origin order's ACTUAL ship date: rma_parts_scored = SUM(failed_quantity) of claims with is_counted_in_score (Form Now's own quality-score filter — excludes contested claims incl. a 300-part outlier) attributed to the period the claimed order SHIPPED, rma_parts = unfiltered, claims = claim count; parts_shipped / orders_shipped by actual ship date. Rate derived client-side as scored ÷ shipped — a true cohort rate. Ship→claim lag is 8 days median (p90 20), so cohorts younger than ~3 weeks are still accumulating claims and read low. DATA-ENTRY WATCH: zero claims logged since 2026-06-23 despite normal ship volume — verify RMA entry hasn't lapsed before trusting recent zeros. Global filters do NOT apply.",
+    source: 'fcm_api_rmapart (cohorted to origin order ship date) + fcm_api_order/orderpart',
     params: zBaseFilters,
     sql: (p) => `
 WITH rma AS (
-  SELECT CAST(${grainExpr('DATE(rejection_date)', p.grain)} AS STRING) AS period,
+  SELECT CAST(${grainExpr('DATE(o.shipped_at)', p.grain)} AS STRING) AS period,
          COUNT(*) AS claims,
-         SUM(failed_quantity) AS rma_parts,
-         SUM(IF(is_counted_in_score, failed_quantity, 0)) AS rma_parts_scored
-  FROM ${RMAPART}
-  WHERE DATE(rejection_date) BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}
+         SUM(r.failed_quantity) AS rma_parts,
+         SUM(IF(r.is_counted_in_score, r.failed_quantity, 0)) AS rma_parts_scored
+  FROM ${RMAPART} r
+  JOIN ${T.order} o ON o.id = r.order_id
+  WHERE o.shipped_at IS NOT NULL
+    AND DATE(o.shipped_at) BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}
   GROUP BY period
 ),
 shipped AS (

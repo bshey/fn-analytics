@@ -39,9 +39,17 @@ export default function RmaPage() {
       xom: number
       items: Row[]
     }
+    // Ship-date cohort: a ticket belongs to the period its ORIGIN ORDER
+    // shipped, so numerator and denominator describe the same orders.
     const byPeriod = new Map<string, Bucket>()
+    let uncohortable = 0
     for (const t of tRows) {
-      const period = periodStart(new Date(num0(t.created_at) * 1000).toISOString().slice(0, 10), grain)
+      const shipDate = t.origin_shipped_at ? String(t.origin_shipped_at).slice(0, 10) : null
+      if (!shipDate || shipDate < queryParams.start || shipDate > queryParams.end) {
+        uncohortable++
+        continue
+      }
+      const period = periodStart(shipDate, grain)
       let b = byPeriod.get(period)
       if (!b) byPeriod.set(period, (b = { fn: 0, xom: 0, items: [] }))
       if (t.rma_type === 'Xometry') b.xom++
@@ -135,14 +143,16 @@ export default function RmaPage() {
       }
     })
 
+    const cohorted = tRows.length - uncohortable
     const totals = {
-      tickets: tRows.length,
-      fn: tRows.filter((t) => t.rma_type !== 'Xometry').length,
+      tickets: cohorted,
+      fn: [...byPeriod.values()].reduce((t, b) => t + b.fn, 0),
       orders: dRows.reduce((t, r) => t + num0(r.orders_shipped), 0),
+      uncohortable,
     }
 
     return { option, csvRows, periods, byPeriod, totals, isEmpty: tRows.length === 0 && dRows.length === 0 }
-  }, [tickets.data, denom.data, grain, mode])
+  }, [tickets.data, denom.data, grain, mode, queryParams.start, queryParams.end])
 
   const ticketColumns: ColumnDef<Row, unknown>[] = useMemo(
     () => [
@@ -154,6 +164,14 @@ export default function RmaPage() {
         meta: { className: 'whitespace-nowrap' },
       },
       { header: 'Type', accessorKey: 'rma_type' },
+      {
+        header: 'Order shipped',
+        id: 'origin_shipped_at',
+        accessorFn: (r) => String(r.origin_shipped_at ?? ''),
+        cell: ({ row }) =>
+          row.original.origin_shipped_at ? String(row.original.origin_shipped_at) : <span className="text-faint">—</span>,
+        meta: { className: 'whitespace-nowrap' },
+      },
       {
         header: 'Title',
         accessorKey: 'title',
@@ -215,7 +233,7 @@ export default function RmaPage() {
         subtitle="Customer-facing RMA tickets (Intercom) vs orders shipped, by period"
         info={{
           definition:
-            'Order-level RMA rate: "Form Now RMA" + "Xometry RMA" Intercom tickets created in the period ÷ orders shipped that period (actual ship date). The gray line is the historical part-level rate (back-office RMA Submission form parts, quality-score filter, ÷ parts shipped) — that form lapsed on Jun 23, 2026, so the line goes quiet even though RMAs continue as tickets. Coverage caveats: the customer-facing ticket types ramped up in early 2026 (Jan–Mar undercount ~30% vs the back-office form where both ran), and tickets carry no part quantities, so order-level is the honest continuing unit. Counts mode stacks tickets by channel. Click a bar for the period\'s tickets. Global date range and grain apply; channel/material filters do not.',
+            'Order-level RMA rate, SHIP-DATE COHORTED: tickets are attributed to the period their ORIGIN ORDER shipped (not when the ticket was filed), so the numerator and denominator describe the same orders — "of orders shipped this period, how many came back". Tickets are fetched up to 45 days past the window to catch late filings (ship→RMA lag: 8 days median, p90 20), which also means cohorts younger than ~3 weeks are still accumulating and read low. The gray line is the historical part-level rate (back-office RMA Submission form parts, quality-score filter, same ship-date cohort, ÷ parts shipped) — that form lapsed Jun 23, 2026. Coverage caveats: customer-facing ticket types ramped up early 2026 (Jan–Mar undercount ~30%), and tickets carry no part quantities, so order-level is the honest continuing unit. Tickets whose origin order is unknown or unshipped are excluded from the rate (counted in the caption) but still listed in the table. Counts mode stacks tickets by channel. Click a bar for the cohort\'s tickets. Global date range and grain apply; channel/material filters do not.',
           source: 'Intercom tickets + fcm_api_rmapart + fcm_api_order/orderpart',
         }}
         csvRows={model.csvRows}
@@ -251,9 +269,13 @@ export default function RmaPage() {
               }}
             />
             <p className="mt-1 text-[11.5px] text-faint">
-              Click a bar to list that period's tickets. Window: {fmtInt(model.totals.tickets)} tickets (
+              Click a bar to list that cohort's tickets. Window: {fmtInt(model.totals.tickets)} tickets cohorted (
               {fmtInt(model.totals.fn)} Form Now / {fmtInt(model.totals.tickets - model.totals.fn)} Xometry) over{' '}
-              {fmtInt(model.totals.orders)} orders shipped. Newest period is provisional (faded).
+              {fmtInt(model.totals.orders)} orders shipped
+              {model.totals.uncohortable > 0
+                ? ` · ${fmtInt(model.totals.uncohortable)} tickets excluded (origin order unknown, unshipped, or shipped outside the range)`
+                : ''}
+              . Cohorts younger than ~3 weeks are still accumulating RMAs.
             </p>
           </>
         )}
