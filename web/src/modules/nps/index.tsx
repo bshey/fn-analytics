@@ -16,6 +16,11 @@ import { EChart, type EChartHandle } from '../../components/EChart'
 
 const MES_URL = 'https://fcm-mes.formlabs.com/orders/'
 
+/** Compact money: $342, $2.1k. */
+function fmtK(v: number): string {
+  return v >= 1000 ? `$${(v / 1000).toFixed(1)}k` : `$${Math.round(v)}`
+}
+
 function scoreBand(nps: number): { label: string; color: string } {
   if (nps >= 9) return { label: 'promoter', color: STATUS.good }
   if (nps >= 7) return { label: 'passive', color: STATUS.warning }
@@ -137,21 +142,49 @@ export default function NpsPage() {
         },
         meta: { align: 'right' },
       },
-      { header: 'Email', accessorKey: 'email', cell: ({ row }) => String(row.original.email || '—') },
+      {
+        header: 'Customer',
+        id: 'email',
+        accessorFn: (r) => String(r.email ?? ''),
+        cell: ({ row }) => {
+          const r = row.original
+          const email = String(r.email || '—')
+          const n = r.cust_orders === null || r.cust_orders === undefined ? null : num0(r.cust_orders)
+          const ltv = r.cust_ltv === null || r.cust_ltv === undefined ? null : num0(r.cust_ltv)
+          return (
+            <span className="whitespace-nowrap">
+              {email}
+              {n !== null && ltv !== null && (
+                <span className="text-faint" title={`${fmtInt(n)} lifetime order${n === 1 ? '' : 's'} · ${fmtK(ltv)} LTV`}>
+                  {' '}· {fmtInt(n)}× / {fmtK(ltv)}
+                </span>
+              )}
+            </span>
+          )
+        },
+      },
       {
         header: 'Order',
         id: 'order',
-        accessorFn: (r) => String(r.order_ref ?? ''),
+        accessorFn: (r) => num0(r.order_bookings),
         cell: ({ row }) => {
           const ref = String(row.original.order_ref ?? '')
           const id = row.original.order_fcm_id
+          const b = row.original.order_bookings
           if (!ref) return <span className="text-faint">—</span>
-          return id ? (
-            <a href={`${MES_URL}${id}`} target="_blank" rel="noreferrer" className="font-medium text-accent hover:underline" title="Open in MES">
-              {ref} ↗
-            </a>
-          ) : (
-            <span>{ref}</span>
+          return (
+            <span className="whitespace-nowrap tabular-nums">
+              {id ? (
+                <a href={`${MES_URL}${id}`} target="_blank" rel="noreferrer" className="font-medium text-accent hover:underline" title="Open in MES">
+                  {ref} ↗
+                </a>
+              ) : (
+                ref
+              )}
+              {b !== null && b !== undefined && (
+                <span className="text-faint" title="Order bookings"> · {fmtK(num0(b))}</span>
+              )}
+            </span>
           )
         },
       },
@@ -240,7 +273,7 @@ export default function NpsPage() {
         subtitle="Every survey response, newest first — all time"
         info={{
           definition:
-            'Every response to the Form Now Customer Order Survey: score (green = promoter 9–10, amber = passive 7–8, red = detractor 0–6), respondent email and improvement comment (hover for full text), the order it came from (links to MES when the order reference resolves against the warehouse — requires VPN at load time), and any uploaded photo/video (opens in a modal, streamed through the app so no Qualtrics login is needed).',
+            'Every response to the Form Now Customer Order Survey: score (green = promoter 9–10, amber = passive 7–8, red = detractor 0–6), respondent email annotated with lifetime orders × and LTV $ (governed bookings summed over the customer\'s non-cancelled orders, matched on the order\'s medusa email), improvement comment (hover for full text), the order it came from with its bookings $ (links to MES when the reference resolves against the warehouse — requires VPN at load time), and any uploaded photo/video (opens in a modal, streamed through the app so no Qualtrics login is needed). The Order column sorts by order $, Customer by email.',
           source: q.data?.meta.source ?? 'Qualtrics API',
         }}
         csvRows={rows}

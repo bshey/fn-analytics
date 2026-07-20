@@ -13,7 +13,7 @@
  */
 import { config } from './config.js'
 import { runRedashQuery } from './redash.js'
-import { T, sqlStringList } from './sql.js'
+import { T, bookingsExpr, sqlStringList } from './sql.js'
 import type { Row } from './registry.js'
 import { rng, periodsBetween } from './mock/helpers.js'
 
@@ -76,33 +76,64 @@ async function exportAll(): Promise<QResponse[]> {
   return body.responses ?? []
 }
 
-/** Map order_id embedded values ("FN-110" or bare "124") to fcm order ids via one warehouse query. */
-async function resolveOrders(refs: string[]): Promise<Map<string, number>> {
-  const out = new Map<string, number>()
+interface OrderMeta {
+  id: number
+  bookings: number | null
+  cust_orders: number | null
+  cust_ltv: number | null
+}
+
+/**
+ * Map order_id embedded values ("FN-110" or bare "124") to fcm order ids plus
+ * order bookings and customer lifetime stats (governed bookings formula,
+ * matched on the order's medusa email) via one warehouse query.
+ */
+async function resolveOrders(refs: string[]): Promise<Map<string, OrderMeta>> {
+  const out = new Map<string, OrderMeta>()
   const clean = [...new Set(refs.map((r) => r.trim()).filter((r) => /^(FN-)?\d{1,7}$/i.test(r)))]
   if (!clean.length) return out
   const displays = clean.map((r) => (r.toUpperCase().startsWith('FN-') ? r.toUpperCase() : `FN-${r}`))
   const bare = clean.filter((r) => !r.toUpperCase().startsWith('FN-')).map((r) => Number(r))
   try {
     const sql = `
-SELECT id, source_display_id FROM ${T.order}
-WHERE source_display_id IN (${sqlStringList(displays)})
-   ${bare.length ? `OR id IN (${bare.join(', ')})` : ''}`
+WITH sel AS (
+  SELECT o.id, o.source_display_id, ${bookingsExpr('o')} AS bookings, LOWER(m.email) AS email
+  FROM ${T.order} o
+  LEFT JOIN ${T.medusaOrder} m ON m.id = o.source_reference_id
+  WHERE o.source_display_id IN (${sqlStringList(displays)})
+     ${bare.length ? `OR o.id IN (${bare.join(', ')})` : ''}
+),
+cust AS (
+  SELECT LOWER(m2.email) AS email, COUNT(*) AS cust_orders, SUM(${bookingsExpr('o2')}) AS cust_ltv
+  FROM ${T.order} o2
+  JOIN ${T.medusaOrder} m2 ON m2.id = o2.source_reference_id
+  WHERE o2.status NOT IN ('QUOTING', 'CANCELLED', 'REJECTED')
+    AND LOWER(m2.email) IN (SELECT email FROM sel WHERE email IS NOT NULL)
+  GROUP BY 1
+)
+SELECT s.id, s.source_display_id, s.bookings, c.cust_orders, c.cust_ltv
+FROM sel s LEFT JOIN cust c ON c.email = s.email`
     const res = await runRedashQuery(sql, { maxAge: 3600 })
-    const byDisplay = new Map<string, number>()
-    const byId = new Set<number>()
+    const byDisplay = new Map<string, OrderMeta>()
+    const byId = new Map<number, OrderMeta>()
     for (const row of res.rows) {
-      byDisplay.set(String(row.source_display_id).toUpperCase(), Number(row.id))
-      byId.add(Number(row.id))
+      const meta: OrderMeta = {
+        id: Number(row.id),
+        bookings: row.bookings === null ? null : Number(row.bookings),
+        cust_orders: row.cust_orders === null ? null : Number(row.cust_orders),
+        cust_ltv: row.cust_ltv === null ? null : Number(row.cust_ltv),
+      }
+      byDisplay.set(String(row.source_display_id).toUpperCase(), meta)
+      byId.set(meta.id, meta)
     }
     for (const ref of clean) {
       const up = ref.toUpperCase()
       const display = up.startsWith('FN-') ? up : `FN-${up}`
-      if (byDisplay.has(display)) out.set(ref, byDisplay.get(display)!)
-      else if (!up.startsWith('FN-') && byId.has(Number(ref))) out.set(ref, Number(ref))
+      const meta = byDisplay.get(display) ?? (!up.startsWith('FN-') ? byId.get(Number(ref)) : undefined)
+      if (meta) out.set(ref, meta)
     }
   } catch {
-    // No VPN / Redash down — MES links simply degrade to absent.
+    // No VPN / Redash down — MES links and $ figures simply degrade to absent.
   }
   return out
 }
@@ -118,6 +149,7 @@ export async function fetchNpsResponses(): Promise<Row[]> {
     .map((r) => {
       const v = r.values
       const ref = String(v.order_id ?? '').trim()
+      const meta = orderMap.get(ref)
       return {
         response_id: r.responseId ?? String(v._recordId ?? ''),
         recorded_at: Math.floor(new Date(String(v.recordedDate ?? v.endDate)).getTime() / 1000),
@@ -125,7 +157,10 @@ export async function fetchNpsResponses(): Promise<Row[]> {
         comment: String(v.QID4_TEXT ?? '').trim(),
         email: String(v.email ?? '').trim(),
         order_ref: ref,
-        order_fcm_id: orderMap.get(ref) ?? null,
+        order_fcm_id: meta?.id ?? null,
+        order_bookings: meta?.bookings ?? null,
+        cust_orders: meta?.cust_orders ?? null,
+        cust_ltv: meta?.cust_ltv ?? null,
         file_id: (v.QID6_FILE_ID as string | undefined) ?? null,
         file_name: (v.QID6_FILE_NAME as string | undefined) ?? null,
         file_type: (v.QID6_FILE_TYPE as string | undefined) ?? null,
@@ -167,6 +202,9 @@ export function mockNpsResponses(): Row[] {
         email: `customer${Math.floor(r() * 60)}@example.com`,
         order_ref: `FN-${1000 + id - 3000}`,
         order_fcm_id: 18000 + (id - 3000),
+        order_bookings: Math.round((120 + r() * 900) * 100) / 100,
+        cust_orders: 1 + Math.floor(r() * 7),
+        cust_ltv: Math.round((200 + r() * 8000) * 100) / 100,
         file_id: null,
         file_name: null,
         file_type: null,
