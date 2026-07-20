@@ -132,6 +132,12 @@ export default function BowlerPage() {
         detail: (p) => (mDays.has(p) ? `${fmtInt(num0(mDays.get(p)!.n_shipped))} orders shipped` : ''),
       },
       {
+        key: 'avg_days', label: 'Avg biz days to ship', kind: 'num', decimals: 1, direction: 'down', defaultPlan: null, nearBand: 1, filtersApply: true,
+        def: 'Mean business days (Mon–Fri) from order to ship — same cohort as the median row (revenue-generating, actual ship period). The mean runs above the median when a few very late orders drag it. Filters apply.',
+        value: (p) => (mDays.has(p) ? num0(mDays.get(p)!.avg_bizdays) : null),
+        detail: (p) => (mDays.has(p) ? `${fmtInt(num0(mDays.get(p)!.n_shipped))} orders shipped` : ''),
+      },
+      {
         key: 'ots', label: '% On-time shipping', kind: 'pct', direction: 'up', defaultPlan: 0.9, nearBand: 0.05, filtersApply: true,
         def: 'Governed OTS: shipped on/before the channel-aware due date ÷ ALL orders due in the period — unshipped count against (stricter than the manual sheet, which divided by shipped; settled weeks converge). Filters apply.',
         value: ratio(mShip, 'on_time', 'orders_due'),

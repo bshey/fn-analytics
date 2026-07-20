@@ -50,7 +50,8 @@ base AS (
 )
 SELECT CAST(${grainExpr('ship_date', p.grain)} AS STRING) AS period,
        COUNT(*) AS n_shipped,
-       APPROX_QUANTILES(ship_idx - order_idx, 100)[OFFSET(50)] AS median_bizdays
+       APPROX_QUANTILES(ship_idx - order_idx, 100)[OFFSET(50)] AS median_bizdays,
+       ROUND(AVG(ship_idx - order_idx), 2) AS avg_bizdays
 FROM base
 WHERE TRUE ${classifiedChannelFilter(p.channels)}
   ${orderPartFilters(p, 'base')}
@@ -58,11 +59,15 @@ GROUP BY period
 ORDER BY period`,
     mock: (p) => {
       const r = rng(`bshipd:${p.grain}`)
-      return periodsBetween(p.start, p.end, p.grain).map((period) => ({
-        period,
-        n_shipped: Math.max(3, Math.round((180 + r() * 60) * (GRAIN_SCALE[p.grain] ?? 1))),
-        median_bizdays: Math.round(2 + r() * 3),
-      }))
+      return periodsBetween(p.start, p.end, p.grain).map((period) => {
+        const median = Math.round(2 + r() * 3)
+        return {
+          period,
+          n_shipped: Math.max(3, Math.round((180 + r() * 60) * (GRAIN_SCALE[p.grain] ?? 1))),
+          median_bizdays: median,
+          avg_bizdays: Math.round((median + 0.5 + r() * 2) * 100) / 100,
+        }
+      })
     },
   },
 
