@@ -8,6 +8,7 @@ import { STATUS } from '../../lib/palette'
 import { gridDefaults, barDefaults } from '../../lib/echarts'
 import { ChartCard } from '../../components/ChartCard'
 import { DataTable } from '../../components/DataTable'
+import { HoverReveal } from '../../components/HoverReveal'
 import { KpiCard } from '../../components/KpiCard'
 import { Modal } from '../../components/Modal'
 import { EmptyState } from '../../components/states'
@@ -157,10 +158,7 @@ export default function NpsPage() {
       {
         header: 'Comment',
         accessorKey: 'comment',
-        cell: ({ row }) => {
-          const v = String(row.original.comment ?? '').trim()
-          return v ? <span className="block max-w-[30rem] truncate" title={v}>{v}</span> : <span className="text-faint">—</span>
-        },
+        cell: ({ row }) => <HoverReveal text={String(row.original.comment ?? '')} />,
       },
       {
         header: 'Photo',

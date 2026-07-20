@@ -8,6 +8,7 @@ import { STATUS } from '../../lib/palette'
 import { gridDefaults, barDefaults } from '../../lib/echarts'
 import { ChartCard } from '../../components/ChartCard'
 import { DataTable } from '../../components/DataTable'
+import { HoverReveal } from '../../components/HoverReveal'
 import { Modal } from '../../components/Modal'
 import { EmptyState } from '../../components/states'
 import { EChart, type EChartHandle } from '../../components/EChart'
@@ -577,10 +578,7 @@ function CsatCard({ adminsById }: { adminsById: Map<string, string> }) {
     {
       header: 'Remark',
       accessorKey: 'remark',
-      cell: ({ row }) => {
-        const v = String(row.original.remark ?? '').trim()
-        return v ? <span className="block max-w-[22rem] truncate" title={v}>{v}</span> : <span className="text-faint">—</span>
-      },
+      cell: ({ row }) => <HoverReveal text={String(row.original.remark ?? '')} className="block max-w-[22rem] truncate" />,
     },
     {
       header: '',
