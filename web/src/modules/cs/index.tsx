@@ -6,6 +6,7 @@ import { fmtInt, fmtPct, num0 } from '../../lib/format'
 import { STATUS } from '../../lib/palette'
 import { gridDefaults, barDefaults } from '../../lib/echarts'
 import { ChartCard } from '../../components/ChartCard'
+import { EmptyState } from '../../components/states'
 import { EChart, type EChartHandle } from '../../components/EChart'
 import { MultiSelect } from '../../components/MultiSelect'
 import { Segmented } from '../../components/Segmented'
@@ -236,8 +237,6 @@ export default function CsPage() {
         isLoading={emails.isLoading}
         isFetching={emails.isFetching}
         error={emails.error}
-        isEmpty={model.isEmpty}
-        emptyText="No inbound emails match the filters in this range."
         height={380}
         actions={
           <Segmented
@@ -307,14 +306,20 @@ export default function CsPage() {
           {toggle(excludeFin, setExcludeFin, 'Exclude Fin-resolved')}
           {toggle(excludeXometry, setExcludeXometry, 'Exclude Xometry')}
         </div>
-        <EChart ref={chartRef} option={model.option} height={300} />
-        <p className="mt-1 text-[11.5px] text-faint">
-          Window: {fmtInt(t.within)}/{fmtInt(t.emails)} within SLA ({t.emails > 0 ? fmtPct(t.within / t.emails) : '—'}) ·{' '}
-          {fmtInt(t.emails - t.replied)} unanswered of which {fmtInt(t.pending)} still under threshold (can still convert).
-          Unanswered emails count against the rate. First load fetches per-conversation threads from Intercom and can take a
-          minute; it's cached after.
-          {model.hasProvisional ? ' Newest period is still in progress (faded).' : ''}
-        </p>
+        {model.isEmpty ? (
+          <EmptyState text="No inbound emails match the filters in this range — loosen a filter above or widen the date range." />
+        ) : (
+          <>
+            <EChart ref={chartRef} option={model.option} height={300} />
+            <p className="mt-1 text-[11.5px] text-faint">
+              Window: {fmtInt(t.within)}/{fmtInt(t.emails)} within SLA ({t.emails > 0 ? fmtPct(t.within / t.emails) : '—'}) ·{' '}
+              {fmtInt(t.emails - t.replied)} unanswered of which {fmtInt(t.pending)} still under threshold (can still convert).
+              Unanswered emails count against the rate. First load fetches per-conversation threads from Intercom and can take a
+              minute; it's cached after.
+              {model.hasProvisional ? ' Newest period is still in progress (faded).' : ''}
+            </p>
+          </>
+        )}
       </ChartCard>
     </div>
   )
