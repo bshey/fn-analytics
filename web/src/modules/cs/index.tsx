@@ -1,16 +1,24 @@
 import { useMemo, useRef, useState } from 'react'
+import type { ColumnDef } from '@tanstack/react-table'
 import { useFormlabsGet, type Row } from '../../lib/api'
 import { useFilters } from '../../lib/filters'
 import { isCurrentPeriod, periodLabel, periodStart } from '../../lib/dates'
-import { fmtInt, fmtPct, num0 } from '../../lib/format'
+import { fmtDateTime, fmtInt, fmtNum, fmtPct, num0 } from '../../lib/format'
 import { STATUS } from '../../lib/palette'
 import { gridDefaults, barDefaults } from '../../lib/echarts'
 import { ChartCard } from '../../components/ChartCard'
+import { DataTable } from '../../components/DataTable'
+import { Modal } from '../../components/Modal'
 import { EmptyState } from '../../components/states'
 import { EChart, type EChartHandle } from '../../components/EChart'
 import { MultiSelect } from '../../components/MultiSelect'
 import { Segmented } from '../../components/Segmented'
 import { ratePoint, tooltipFormatter } from '../shipments/metrics'
+
+interface CsItem extends Row {
+  status: 'within' | 'missed' | 'pending'
+  bh_hours: number
+}
 
 // ---------------------------------------------------------------------------
 // Business-hours math in America/New_York. The two-offset trick turns an ET
@@ -135,27 +143,37 @@ export default function CsPage() {
       within: number
       replied: number
       pending: number
+      items: CsItem[]
     }
     const byPeriod = new Map<string, Bucket>()
-    let tot: Bucket = { emails: 0, within: 0, replied: 0, pending: 0 }
+    let tot = { emails: 0, within: 0, replied: 0, pending: 0 }
     for (const r of filtered) {
       const at = num0(r.email_at) * 1000
       const period = periodStart(etDate(at), grain)
       let b = byPeriod.get(period)
-      if (!b) byPeriod.set(period, (b = { emails: 0, within: 0, replied: 0, pending: 0 }))
+      if (!b) byPeriod.set(period, (b = { emails: 0, within: 0, replied: 0, pending: 0, items: [] }))
       b.emails++
       tot.emails++
+      let status: CsItem['status'] = 'missed'
+      let bh: number
       if (r.replied_at) {
         b.replied++
         tot.replied++
-        if (businessHours(at, num0(r.replied_at) * 1000, daySet, slaStart, slaEnd) <= thresholdH) {
+        bh = businessHours(at, num0(r.replied_at) * 1000, daySet, slaStart, slaEnd)
+        if (bh <= thresholdH) {
+          status = 'within'
           b.within++
           tot.within++
         }
-      } else if (businessHours(at, now, daySet, slaStart, slaEnd) <= thresholdH) {
-        b.pending++
-        tot.pending++
+      } else {
+        bh = businessHours(at, now, daySet, slaStart, slaEnd)
+        if (bh <= thresholdH) {
+          status = 'pending'
+          b.pending++
+          tot.pending++
+        }
       }
+      b.items.push({ ...r, status, bh_hours: Math.round(bh * 10) / 10 })
     }
 
     const periods = [...byPeriod.keys()].sort()
@@ -212,8 +230,69 @@ export default function CsPage() {
       return { period: p, emails: b.emails, within_sla: b.within, replied: b.replied, pending_under_threshold: b.pending }
     })
 
-    return { option, csvRows, tot, nFiltered: filtered.length, hasProvisional: provisional.some(Boolean), isEmpty: filtered.length === 0 }
+    const itemsByPeriod = new Map(periods.map((p) => [p, byPeriod.get(p)!.items]))
+    return { option, csvRows, tot, periods, itemsByPeriod, hasProvisional: provisional.some(Boolean), isEmpty: filtered.length === 0 }
   }, [emails.data, grain, slaDays, slaStart, slaEnd, thresholdH, assignees, firstOnly, excludeFin, excludeXometry, excludeClosedNoReply, mode])
+
+  const [modalPeriod, setModalPeriod] = useState<string | null>(null)
+  const onBarClick = (params: unknown) => {
+    const idx = (params as { dataIndex?: number }).dataIndex
+    if (idx !== undefined && model.periods[idx]) setModalPeriod(model.periods[idx])
+  }
+  const modalItems = modalPeriod ? (model.itemsByPeriod.get(modalPeriod) ?? []) : []
+  const STATUS_BADGE: Record<CsItem['status'], { label: string; color: string }> = {
+    within: { label: 'within SLA', color: STATUS.good },
+    missed: { label: 'missed', color: STATUS.critical },
+    pending: { label: 'pending', color: '#898781' },
+  }
+  const modalColumns: ColumnDef<CsItem, unknown>[] = [
+    {
+      header: 'Received (ET)',
+      id: 'email_at',
+      accessorFn: (r) => num0(r.email_at),
+      cell: ({ row }) => fmtDateTime(new Date(num0(row.original.email_at) * 1000).toISOString()),
+    },
+    { header: 'Sender', accessorKey: 'sender', cell: ({ row }) => String(row.original.sender || '—') },
+    {
+      header: 'Subject',
+      accessorKey: 'subject',
+      cell: ({ row }) => <span className="block max-w-[26rem] truncate" title={String(row.original.subject)}>{String(row.original.subject)}</span>,
+    },
+    {
+      header: 'Response (biz h)',
+      id: 'bh_hours',
+      accessorFn: (r) => r.bh_hours,
+      cell: ({ row }) => {
+        const it = row.original
+        const b = STATUS_BADGE[it.status]
+        return (
+          <span className="tabular-nums">
+            {it.replied_at ? `${fmtNum(it.bh_hours, 1)} h` : `${fmtNum(it.bh_hours, 1)} h waiting`}{' '}
+            <span className="rounded px-1 py-0.5 text-[10.5px] font-medium text-white" style={{ backgroundColor: b.color }}>
+              {b.label}
+            </span>
+          </span>
+        )
+      },
+      meta: { align: 'right' },
+    },
+    {
+      header: '',
+      id: 'open',
+      cell: ({ row }) =>
+        row.original.url ? (
+          <a
+            href={String(row.original.url)}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[12px] font-medium text-accent hover:underline"
+            title="Open in Intercom"
+          >
+            Intercom ↗
+          </a>
+        ) : null,
+    },
+  ]
 
   const t = model.tot
   const toggle = (checked: boolean, set: (v: boolean) => void, label: string) => (
@@ -313,8 +392,9 @@ export default function CsPage() {
           <EmptyState text="No inbound emails match the filters in this range — loosen a filter above or widen the date range." />
         ) : (
           <>
-            <EChart ref={chartRef} option={model.option} height={300} />
+            <EChart ref={chartRef} option={model.option} height={300} onClick={onBarClick} />
             <p className="mt-1 text-[11.5px] text-faint">
+              Click a bar to list that period's emails.{' '}
               Window: {fmtInt(t.within)}/{fmtInt(t.emails)} within SLA ({t.emails > 0 ? fmtPct(t.within / t.emails) : '—'}) ·{' '}
               {fmtInt(t.emails - t.replied)} unanswered of which {fmtInt(t.pending)} still under threshold (can still convert).
               Unanswered emails count against the rate. First load fetches per-conversation threads from Intercom and can take a
@@ -324,6 +404,24 @@ export default function CsPage() {
           </>
         )}
       </ChartCard>
+      {modalPeriod && (
+        <Modal
+          title={`Inbound emails — ${periodLabel(modalPeriod, grain)} (${fmtInt(modalItems.length)})`}
+          onClose={() => setModalPeriod(null)}
+        >
+          <DataTable
+            data={modalItems}
+            columns={modalColumns}
+            initialSort={[{ id: 'email_at', desc: false }]}
+            csvName={`cs-emails-${modalPeriod}`}
+            fit
+          />
+          <p className="mt-2 text-[11px] text-faint">
+            Response time in business hours under the current SLA window; the same filters as the chart apply.
+            Links open the conversation in the Intercom inbox.
+          </p>
+        </Modal>
+      )}
     </div>
   )
 }

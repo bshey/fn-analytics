@@ -91,6 +91,24 @@ export interface EmailRecord extends Row {
   xometry: boolean
   /** No human reply, but a HUMAN closed the conversation after this email — an explicit "no response needed" disposition. Bot/auto-closes don't count, or misses would hide. */
   closed_no_reply: boolean
+  sender: string
+  subject: string
+  /** Deep link into the Intercom inbox. */
+  url: string
+}
+
+// Workspace id code (e.g. "vkap7doh") for inbox deep links — fetched once.
+let appIdPromise: Promise<string> | null = null
+function getAppId(): Promise<string> {
+  if (!appIdPromise) {
+    appIdPromise = ic<{ app?: { id_code?: string } }>('/me')
+      .then((me) => me.app?.id_code ?? '')
+      .catch(() => {
+        appIdPromise = null
+        return ''
+      })
+  }
+  return appIdPromise
 }
 
 // Parts are immutable once a conversation stops changing — cache by (id, updated_at).
@@ -133,7 +151,7 @@ function isHumanReply(p: ConversationPart): boolean {
   )
 }
 
-function extractRecords(c: ConversationDetail): EmailRecord[] {
+function extractRecords(c: ConversationDetail, appId: string): EmailRecord[] {
   const parts = c.conversation_parts?.conversation_parts ?? []
   const humanReplies = parts.filter(isHumanReply).map((p) => p.created_at)
   // A bodyless close by a real teammate; a close WITH a body is a reply-and-close
@@ -144,6 +162,9 @@ function extractRecords(c: ConversationDetail): EmailRecord[] {
   const customerEmails = [c.created_at, ...parts.filter((p) => p.author?.type === 'user' && p.part_type === 'comment').map((p) => p.created_at)]
   const finResolved = c.ai_agent_participated && humanReplies.length === 0
   const xometry = isXometry(c.source?.author?.email)
+  const sender = c.source?.author?.email ?? ''
+  const subject = (c.source?.subject ?? '').replace(/<[^>]+>/g, '').trim() || '(no subject)'
+  const url = appId ? `https://app.intercom.com/a/inbox/${appId}/inbox/conversation/${c.id}` : ''
   return customerEmails.map((at, i) => {
     const replied = humanReplies.find((r) => r >= at) ?? null
     return {
@@ -155,6 +176,9 @@ function extractRecords(c: ConversationDetail): EmailRecord[] {
       fin_resolved: finResolved,
       xometry,
       closed_no_reply: replied === null && humanCloses.some((t) => t >= at),
+      sender,
+      subject,
+      url,
     }
   })
 }
@@ -190,13 +214,14 @@ export async function fetchCsEmails(start: string, end: string): Promise<Row[]> 
   }
 
   const emailConvs = seen.filter((c) => c.source?.type === 'email')
+  const appId = await getAppId()
   const results = await pool(emailConvs, 8, async (c) => {
     const key = `${c.id}:${c.updated_at}`
     const hit = convCache.get(key)
     if (hit) return hit
     try {
       const detail = await ic<ConversationDetail>(`/conversations/${c.id}?display_as=plaintext`)
-      const records = extractRecords(detail)
+      const records = extractRecords(detail, appId)
       cachePut(key, records)
       return records
     } catch {
@@ -250,6 +275,9 @@ export function mockCsEmails(start: string, end: string): Row[] {
         fin_resolved: finResolved,
         xometry: r() < 0.25,
         closed_no_reply: !replied && !finResolved && r() < 0.5,
+        sender: `customer${Math.floor(r() * 40)}@example.com`,
+        subject: `Order question #${1000 + Math.floor(r() * 900)}`,
+        url: '',
       })
     }
   }
