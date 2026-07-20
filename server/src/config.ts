@@ -19,6 +19,10 @@ export const config = {
   formlabsClientSecret: process.env.FORMLABS_API_TOKEN ?? '',
   // Intercom REST access token (Customer Service view).
   intercomToken: process.env.INTERCOM_ACCESS_TOKEN ?? '',
+  // Qualtrics (NPS view).
+  qualtricsToken: process.env.QUALTRICS_API_TOKEN ?? '',
+  qualtricsDatacenter: process.env.QUALTRICS_DATACENTER ?? 'iad1',
+  qualtricsNpsSurvey: process.env.QUALTRICS_NPS_SURVEY_ID ?? '',
   port: Number(process.env.PORT ?? 4600),
   mock: process.env.MOCK === '1',
   isProd: process.env.NODE_ENV === 'production',

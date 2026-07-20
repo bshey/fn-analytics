@@ -8,6 +8,7 @@ import OrdersPage from './modules/orders'
 import FloorPage from './modules/floor'
 import PredictorPage from './modules/predictor'
 import CsPage from './modules/cs'
+import NpsPage from './modules/nps'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -33,6 +34,7 @@ export default function App() {
               <Route path="/floor" element={<FloorPage />} />
               <Route path="/predictor" element={<PredictorPage />} />
               <Route path="/cs" element={<CsPage />} />
+              <Route path="/nps" element={<NpsPage />} />
               <Route path="*" element={<Navigate to="/shipments" replace />} />
             </Route>
           </Routes>

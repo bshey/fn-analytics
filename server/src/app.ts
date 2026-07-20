@@ -8,6 +8,7 @@ import { registry } from './queries/index.js'
 import { mapMaterialRows } from './queries/dims.js'
 import type { Row } from './registry.js'
 import { CHANNELS, MFG_TYPES } from './sql.js'
+import { QualtricsError, fetchNpsFile, fetchNpsResponses, hasQualtricsCreds, mockNpsResponses } from './qualtrics.js'
 import {
   IntercomError,
   fetchCsAdmins,
@@ -239,6 +240,64 @@ app.get('/api/cs_ratings', (req, res, next) => {
     () => fetchCsRatings(start, end),
     () => mockCsRatings(start, end),
   )(req, res, next)
+})
+
+/** Qualtrics NPS — all-time responses, cached; the UI slices windows client-side. */
+app.get('/api/nps_responses', async (req, res) => {
+  try {
+    const meta = { name: 'nps_responses', source: 'Qualtrics API (Form Now Customer Order Survey)', description: '', cached: false, retrievedAt: new Date().toISOString() }
+    if (config.mock) {
+      res.json({ rows: mockNpsResponses(), meta: { ...meta, mock: true } })
+      return
+    }
+    if (!hasQualtricsCreds()) {
+      res.status(503).json({ error: 'Qualtrics credentials not configured', hint: 'Set QUALTRICS_API_TOKEN / QUALTRICS_NPS_SURVEY_ID in .env.' })
+      return
+    }
+    const key = 'qualtrics:nps'
+    if (req.query.refresh !== '1') {
+      const hit = cacheGet<{ rows: Row[]; retrievedAt: string }>(key)
+      if (hit) {
+        res.json({ rows: hit.rows, meta: { ...meta, mock: false, cached: true, retrievedAt: hit.retrievedAt } })
+        return
+      }
+    }
+    const rows = await fetchNpsResponses()
+    cacheSet(key, { rows, retrievedAt: meta.retrievedAt }, 900)
+    res.json({ rows, meta: { ...meta, mock: false } })
+  } catch (e) {
+    if (e instanceof QualtricsError) {
+      res.status(e.status).json({ error: e.message, hint: e.hint })
+      return
+    }
+    handleError(res, e)
+  }
+})
+
+/** Proxy an uploaded survey photo/video (adds the API token the browser can't). */
+app.get('/api/nps_file', async (req, res) => {
+  const rid = String(req.query.rid ?? '')
+  const fid = String(req.query.fid ?? '')
+  if (!/^[A-Za-z0-9_-]{5,40}$/.test(rid) || !/^[A-Za-z0-9_-]{5,40}$/.test(fid)) {
+    res.status(400).json({ error: 'Expected rid and fid' })
+    return
+  }
+  if (config.mock || !hasQualtricsCreds()) {
+    res.status(404).json({ error: 'File proxy unavailable' })
+    return
+  }
+  try {
+    const f = await fetchNpsFile(rid, fid)
+    res.set('Content-Type', f.contentType)
+    res.set('Cache-Control', 'private, max-age=3600')
+    res.send(Buffer.from(f.bytes))
+  } catch (e) {
+    if (e instanceof QualtricsError) {
+      res.status(e.status).json({ error: e.message })
+      return
+    }
+    handleError(res, e)
+  }
 })
 
 app.get('/api/printer_queues', formlabsRoute('printer_queues', 180, fetchPrinterQueues, mockPrinterQueues))

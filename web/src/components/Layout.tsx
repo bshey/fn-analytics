@@ -34,6 +34,11 @@ const NAV = [
     label: 'Customer Service',
     icon: <path d="M2 3h12v8H8l-3 3v-3H2zM5 6.5h6M5 8.5h4" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinecap="round" strokeLinejoin="round" />,
   },
+  {
+    to: '/nps',
+    label: 'NPS',
+    icon: <path d="M8 2.5l1.7 3.6 3.8.5-2.8 2.7.7 3.9L8 11.3l-3.4 1.9.7-3.9-2.8-2.7 3.8-.5z" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinejoin="round" />,
+  },
 ]
 
 export function Layout() {
