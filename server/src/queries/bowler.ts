@@ -80,7 +80,11 @@ ORDER BY period`,
 SELECT CAST(${grainExpr('calendar_date', p.grain)} AS STRING) AS period,
        SUM(total_active_seconds) AS active_seconds,
        SUM(n_healthy_printers_in_fleet) * 86400 AS healthy_capacity_seconds,
-       SUM(n_total_printers_in_fleet) * 86400 AS fleet_capacity_seconds
+       SUM(n_total_printers_in_fleet) * 86400 AS fleet_capacity_seconds,
+       SUM(IF(printer_type LIKE 'Fuse%', total_active_seconds, 0)) AS sls_active_seconds,
+       SUM(IF(printer_type LIKE 'Fuse%', n_healthy_printers_in_fleet, 0)) * 86400 AS sls_healthy_capacity_seconds,
+       SUM(IF(printer_type NOT LIKE 'Fuse%', total_active_seconds, 0)) AS sla_active_seconds,
+       SUM(IF(printer_type NOT LIKE 'Fuse%', n_healthy_printers_in_fleet, 0)) * 86400 AS sla_healthy_capacity_seconds
 FROM ${UTIL_DAILY}
 WHERE calendar_date BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}
   AND calendar_date <= CURRENT_DATE()
@@ -89,12 +93,19 @@ ORDER BY period`,
     mock: (p) => {
       const r = rng(`butil:${p.grain}`)
       return periodsBetween(p.start, p.end, p.grain).map((period) => {
-        const cap = Math.round(80 * 86400 * 7 * (GRAIN_SCALE[p.grain] ?? 1))
+        const slaCap = Math.round(37 * 86400 * 7 * (GRAIN_SCALE[p.grain] ?? 1))
+        const slsCap = Math.round(43 * 86400 * 7 * (GRAIN_SCALE[p.grain] ?? 1))
+        const slaAct = Math.round(slaCap * (0.2 + r() * 0.15))
+        const slsAct = Math.round(slsCap * (0.3 + r() * 0.15))
         return {
           period,
-          active_seconds: Math.round(cap * (0.25 + r() * 0.15)),
-          healthy_capacity_seconds: cap,
-          fleet_capacity_seconds: Math.round(cap * 1.16),
+          active_seconds: slaAct + slsAct,
+          healthy_capacity_seconds: slaCap + slsCap,
+          fleet_capacity_seconds: Math.round((slaCap + slsCap) * 1.16),
+          sls_active_seconds: slsAct,
+          sls_healthy_capacity_seconds: slsCap,
+          sla_active_seconds: slaAct,
+          sla_healthy_capacity_seconds: slaCap,
         }
       })
     },

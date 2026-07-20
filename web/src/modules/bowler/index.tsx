@@ -55,8 +55,6 @@ export default function BowlerPage() {
   const days = useNamedQuery('bowler_ship_days', queryParams)
   const util = useNamedQuery('bowler_utilization', queryParams)
   const yld = useNamedQuery('bowler_yield', queryParams)
-  const rma = useNamedQuery('bowler_rma', queryParams)
-  const labor = useNamedQuery('bowler_labor', queryParams)
   const nps = useFormlabsGet('nps_responses', {}, { staleMs: 10 * 60_000 })
 
   const [plans, setPlans] = useState<Record<string, number | null>>(loadPlans)
@@ -75,29 +73,9 @@ export default function BowlerPage() {
     const mDays = toMap(days.data?.rows)
     const mUtil = toMap(util.data?.rows)
     const mYield = toMap(yld.data?.rows)
-    const mRma = toMap(rma.data?.rows)
-    const mLabor = toMap(labor.data?.rows)
 
-    // NPS per period + cumulative (all-time as of each period's end).
+    // NPS: trailing 30 days ending at each period's end (rolling window).
     const npsRows = ((nps.data?.rows ?? []) as Row[]).slice().sort((a, b) => num0(a.recorded_at) - num0(b.recorded_at))
-    const startS = Math.floor(new Date(`${queryParams.start}T00:00:00Z`).getTime() / 1000)
-    const endS = Math.floor(new Date(`${queryParams.end}T23:59:59Z`).getTime() / 1000)
-    const npsByPeriod = new Map<string, { p: number; d: number; n: number }>()
-    for (const r of npsRows) {
-      const at = num0(r.recorded_at)
-      if (at < startS || at > endS) continue
-      const period = periodStart(new Date(at * 1000).toISOString().slice(0, 10), grain)
-      let b = npsByPeriod.get(period)
-      if (!b) npsByPeriod.set(period, (b = { p: 0, d: 0, n: 0 }))
-      const s = num0(r.nps)
-      if (s >= 9) b.p++
-      else if (s <= 6) b.d++
-      b.n++
-    }
-    const npsWeek = (period: string): { nps: number | null; n: number } => {
-      const b = npsByPeriod.get(period)
-      return b && b.n ? { nps: Math.round(((b.p - b.d) / b.n) * 100), n: b.n } : { nps: null, n: 0 }
-    }
     const periodEndS = (period: string): number => {
       const d = new Date(`${period}T00:00:00Z`)
       switch (grain) {
@@ -109,11 +87,14 @@ export default function BowlerPage() {
       }
       return Math.floor(d.getTime() / 1000)
     }
-    const npsAllTime = (period: string): { nps: number | null; n: number } => {
-      const cutoff = periodEndS(period)
+    const npsTrailing30 = (period: string): { nps: number | null; n: number } => {
+      const end = Math.min(periodEndS(period), Math.floor(Date.now() / 1000))
+      const start = end - 30 * 86400
       let p = 0, d = 0, n = 0
       for (const r of npsRows) {
-        if (num0(r.recorded_at) >= cutoff) break
+        const at = num0(r.recorded_at)
+        if (at < start) continue
+        if (at >= end) break
         const s = num0(r.nps)
         if (s >= 9) p++
         else if (s <= 6) d++
@@ -163,9 +144,14 @@ export default function BowlerPage() {
         detail: counts(mShip, 'within_36h', 'orders_shipped', 'shipped'),
       },
       {
-        key: 'util', label: '% Equipment utilization', kind: 'pct', direction: 'up', defaultPlan: 0.4, nearBand: 0.05, filtersApply: false,
-        def: 'Printer active seconds ÷ healthy-fleet capacity (fleet minus printers marked down — a fixed assumption inside v_utilization_daily). Summed seconds, so ≤1.4 pts from the manual sheet, which averaged daily percentages. Filters do not apply.',
-        value: ratio(mUtil, 'active_seconds', 'healthy_capacity_seconds'),
+        key: 'util_sla', label: '% Utilization — SLA', kind: 'pct', direction: 'up', defaultPlan: 0.4, nearBand: 0.05, filtersApply: false,
+        def: 'Form 4 + Form 4L active seconds ÷ their healthy-fleet capacity (fleet minus printers marked down — a fixed assumption inside v_utilization_daily). Filters do not apply.',
+        value: ratio(mUtil, 'sla_active_seconds', 'sla_healthy_capacity_seconds'),
+      },
+      {
+        key: 'util_sls', label: '% Utilization — SLS', kind: 'pct', direction: 'up', defaultPlan: 0.4, nearBand: 0.05, filtersApply: false,
+        def: 'Fuse 1+ active seconds ÷ their healthy-fleet capacity (fleet minus printers marked down — a fixed assumption inside v_utilization_daily). Filters do not apply.',
+        value: ratio(mUtil, 'sls_active_seconds', 'sls_healthy_capacity_seconds'),
       },
       {
         key: 'yield', label: 'Part yield %', kind: 'pct', direction: 'up', defaultPlan: 0.8, nearBand: 0.05, filtersApply: false,
@@ -174,41 +160,19 @@ export default function BowlerPage() {
         detail: counts(mYield, 'parts_shipped', 'parts_attempted', 'attempted'),
       },
       {
-        key: 'rma', label: 'RMA %', kind: 'pct', direction: 'down', defaultPlan: 0.02, nearBand: 0.01, filtersApply: false,
-        def: 'RMA parts counted in Form Now\'s quality score (rejection-date cohort, contested claims excluded) ÷ parts shipped that period (actual ship date). Median ship→claim lag is 8 days, so the trailing ~3 weeks read low. Filters do not apply.',
-        value: ratio(mRma, 'rma_parts_scored', 'parts_shipped'),
-        detail: counts(mRma, 'rma_parts_scored', 'parts_shipped', 'shipped'),
-      },
-      {
-        key: 'labor', label: 'Labor cost / revenue', kind: 'pct', direction: 'down', defaultPlan: 0.2, nearBand: 0.05, filtersApply: false,
-        def: 'Burdened labor cost (punch-clock hours × salaries × 1.25) ÷ revenue shipped, from v_labor_daily. Requires a data-team access grant — see the note below the table if this row is empty. Filters do not apply.',
-        value: ratio(mLabor, 'labor_cost', 'revenue_shipped'),
-      },
-      {
-        key: 'nps_week', label: 'NPS — period', kind: 'num', decimals: 0, direction: 'up', defaultPlan: 40, nearBand: 10, filtersApply: false,
-        def: 'NPS from survey responses received in the period (%promoters − %detractors). Thin periods are anecdotes — check the n in the hover. Filters do not apply.',
-        value: (p) => npsWeek(p).nps,
-        detail: (p) => `${fmtInt(npsWeek(p).n)} responses`,
-      },
-      {
-        key: 'nps_all', label: 'NPS — all time', kind: 'num', decimals: 0, direction: 'up', defaultPlan: 40, nearBand: 10, filtersApply: false,
-        def: 'Rolling all-time NPS as of each period\'s end (every response since the survey launched). Filters do not apply.',
-        value: (p) => npsAllTime(p).nps,
-        detail: (p) => `${fmtInt(npsAllTime(p).n)} responses to date`,
+        key: 'nps_t30', label: 'NPS — trailing 30d', kind: 'num', decimals: 0, direction: 'up', defaultPlan: 40, nearBand: 10, filtersApply: false,
+        def: 'NPS over the 30 days ending at each period\'s close (%promoters − %detractors, rolling window — adjacent columns overlap by design). Hover shows the response count. Filters do not apply.',
+        value: (p) => npsTrailing30(p).nps,
+        detail: (p) => `${fmtInt(npsTrailing30(p).n)} responses in window`,
       },
     ]
 
     const periodSet = new Set<string>()
-    for (const m of [mPlaced, mShip, mDays, mUtil, mYield, mRma, mLabor]) for (const p of m.keys()) periodSet.add(p)
-    for (const p of npsByPeriod.keys()) periodSet.add(p)
+    for (const m of [mPlaced, mShip, mDays, mUtil, mYield]) for (const p of m.keys()) periodSet.add(p)
     const periods = [...periodSet].sort()
 
-    // RMA logging health: latest period with any claim activity.
-    const lastRmaPeriod = [...mRma.entries()].filter(([, r]) => num0(r.claims) > 0).map(([p]) => p).sort().pop() ?? null
-    const rmaStale = mRma.size > 0 && (!lastRmaPeriod || lastRmaPeriod < periods[Math.max(0, periods.length - 3)])
-
-    return { metrics, periods, rmaStale, lastRmaPeriod }
-  }, [placed.data, ship.data, days.data, util.data, yld.data, rma.data, labor.data, nps.data, grain, queryParams.start, queryParams.end])
+    return { metrics, periods }
+  }, [placed.data, ship.data, days.data, util.data, yld.data, nps.data, grain, queryParams.start, queryParams.end])
 
   const fmtVal = (m: MetricDef, v: number | null): string => {
     if (v === null) return '—'
@@ -258,10 +222,10 @@ export default function BowlerPage() {
         <table className="w-full border-collapse bg-white text-[12.5px]">
           <thead>
             <tr>
-              <th className="sticky left-0 z-10 border-b border-line bg-[#fafbfc] px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wide text-sub">Metric</th>
-              <th className="border-b border-line bg-[#fafbfc] px-2 py-2 text-right text-[11px] font-medium uppercase tracking-wide text-sub">Plan</th>
+              <th className="sticky left-0 z-10 border-b border-r border-line bg-[#fafbfc] px-3 py-2 text-left text-[11px] font-medium uppercase tracking-wide text-sub">Metric</th>
+              <th className="border-b border-r border-line bg-[#fafbfc] px-2 py-2 text-center text-[11px] font-medium uppercase tracking-wide text-sub">Plan</th>
               {model.periods.map((p) => (
-                <th key={p} className="whitespace-nowrap border-b border-line bg-[#fafbfc] px-2 py-2 text-right text-[11px] font-medium uppercase tracking-wide text-sub">
+                <th key={p} className="whitespace-nowrap border-b border-r border-line/70 bg-[#fafbfc] px-3 py-2 text-center text-[11px] font-medium uppercase tracking-wide text-sub last:border-r-0">
                   {periodLabel(p, grain)}
                 </th>
               ))}
@@ -271,12 +235,12 @@ export default function BowlerPage() {
             {model.metrics.map((m) => {
               const plan = planOf(m)
               return (
-                <tr key={m.key} className="border-b border-line/60 last:border-b-0">
-                  <td className="sticky left-0 z-10 max-w-[15rem] bg-white px-3 py-1.5 font-medium" title={m.def}>
+                <tr key={m.key} className="border-b border-line/70 last:border-b-0">
+                  <td className="sticky left-0 z-10 max-w-[15rem] border-r border-line bg-white px-3 py-2 font-medium" title={m.def}>
                     {m.label}
                     {!m.filtersApply && <span className="text-faint" title="Global channel/material filters do not apply"> ◦</span>}
                   </td>
-                  <td className="px-2 py-1.5 text-right">
+                  <td className="border-r border-line px-2 py-2 text-center">
                     <input
                       type="number"
                       step={m.kind === 'pct' ? 1 : 0.5}
@@ -289,7 +253,7 @@ export default function BowlerPage() {
                           [m.key]: raw === '' ? null : m.kind === 'pct' ? Number(raw) / 100 : Number(raw),
                         }))
                       }}
-                      className="w-16 rounded-md border border-line px-1 py-0.5 text-right text-[12px] tabular-nums"
+                      className="w-16 rounded-md border border-line px-1 py-0.5 text-center text-[12px] tabular-nums"
                       title={m.kind === 'pct' ? 'Plan in % (e.g. 90)' : 'Plan value'}
                     />
                   </td>
@@ -301,7 +265,7 @@ export default function BowlerPage() {
                     return (
                       <td
                         key={p}
-                        className={`whitespace-nowrap px-2 py-1.5 text-right tabular-nums ${provisional ? 'opacity-60' : ''}`}
+                        className={`whitespace-nowrap border-r border-line/70 px-3 py-2 text-center tabular-nums last:border-r-0 ${provisional ? 'opacity-60' : ''}`}
                         style={bg ? { backgroundColor: bg } : undefined}
                         title={detail || undefined}
                       >
@@ -320,19 +284,6 @@ export default function BowlerPage() {
           ◦ = global filters don't apply to that row. Newest period is provisional (faded). Plans are stored in this
           browser; percent plans are entered as whole numbers (90 = 90%).
         </p>
-        {model.rmaStale && (
-          <p className="rounded-md border border-warn/30 bg-amber-50 px-2 py-1 text-warn">
-            RMA watch: no RMA claims logged since {model.lastRmaPeriod ? periodLabel(model.lastRmaPeriod, grain) : 'before this range'} while shipping
-            continued — verify RMA entry in the admin tool hasn't lapsed before trusting the green zeros.
-          </p>
-        )}
-        {labor.error && (
-          <p className="rounded-md border border-warn/30 bg-amber-50 px-2 py-1 text-warn">
-            Labor cost / revenue is blocked: the payroll-backed view (v_labor_daily) reads confidential tables the app's
-            Redash account can't access. Ask the data team to grant access or nightly-materialize t_labor_daily without
-            per-person fields — the row lights up automatically once readable.
-          </p>
-        )}
       </div>
     </ChartCard>
   )
