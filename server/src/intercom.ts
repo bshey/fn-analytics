@@ -89,6 +89,8 @@ export interface EmailRecord extends Row {
   assignee: string | null
   fin_resolved: boolean
   xometry: boolean
+  /** No human reply, but a HUMAN closed the conversation after this email — an explicit "no response needed" disposition. Bot/auto-closes don't count, or misses would hide. */
+  closed_no_reply: boolean
 }
 
 // Parts are immutable once a conversation stops changing — cache by (id, updated_at).
@@ -134,18 +136,27 @@ function isHumanReply(p: ConversationPart): boolean {
 function extractRecords(c: ConversationDetail): EmailRecord[] {
   const parts = c.conversation_parts?.conversation_parts ?? []
   const humanReplies = parts.filter(isHumanReply).map((p) => p.created_at)
+  // A bodyless close by a real teammate; a close WITH a body is a reply-and-close
+  // and already counts as a human reply above.
+  const humanCloses = parts
+    .filter((p) => p.author?.type === 'admin' && p.part_type === 'close' && !isHumanReply(p))
+    .map((p) => p.created_at)
   const customerEmails = [c.created_at, ...parts.filter((p) => p.author?.type === 'user' && p.part_type === 'comment').map((p) => p.created_at)]
   const finResolved = c.ai_agent_participated && humanReplies.length === 0
   const xometry = isXometry(c.source?.author?.email)
-  return customerEmails.map((at, i) => ({
-    conv_id: c.id,
-    email_at: at,
-    replied_at: humanReplies.find((r) => r >= at) ?? null,
-    first: i === 0,
-    assignee: c.admin_assignee_id === null || c.admin_assignee_id === undefined ? null : String(c.admin_assignee_id),
-    fin_resolved: finResolved,
-    xometry,
-  }))
+  return customerEmails.map((at, i) => {
+    const replied = humanReplies.find((r) => r >= at) ?? null
+    return {
+      conv_id: c.id,
+      email_at: at,
+      replied_at: replied,
+      first: i === 0,
+      assignee: c.admin_assignee_id === null || c.admin_assignee_id === undefined ? null : String(c.admin_assignee_id),
+      fin_resolved: finResolved,
+      xometry,
+      closed_no_reply: replied === null && humanCloses.some((t) => t >= at),
+    }
+  })
 }
 
 /** All inbound-email records for conversations active in [start, end] (ISO dates). */
@@ -238,6 +249,7 @@ export function mockCsEmails(start: string, end: string): Row[] {
         assignee: r() < 0.3 ? null : MOCK_ADMINS[Math.floor(r() * MOCK_ADMINS.length)].id,
         fin_resolved: finResolved,
         xometry: r() < 0.25,
+        closed_no_reply: !replied && !finResolved && r() < 0.5,
       })
     }
   }

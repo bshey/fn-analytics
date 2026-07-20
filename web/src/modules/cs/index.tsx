@@ -99,6 +99,7 @@ export default function CsPage() {
   const [firstOnly, setFirstOnly] = useState(false)
   const [excludeFin, setExcludeFin] = useState(true)
   const [excludeXometry, setExcludeXometry] = useState(true)
+  const [excludeClosedNoReply, setExcludeClosedNoReply] = useState(true)
   const [mode, setMode] = useState<Mode>('pct')
 
   const emails = useFormlabsGet('cs_emails', { start: queryParams.start, end: queryParams.end }, { staleMs: 10 * 60_000 })
@@ -120,6 +121,7 @@ export default function CsPage() {
     const filtered = rows.filter((r) => {
       if (excludeXometry && r.xometry) return false
       if (excludeFin && r.fin_resolved) return false
+      if (excludeClosedNoReply && r.closed_no_reply) return false
       if (firstOnly && !r.first) return false
       if (assignees.length) {
         const a = r.assignee === null || r.assignee === undefined ? 'none' : String(r.assignee)
@@ -211,7 +213,7 @@ export default function CsPage() {
     })
 
     return { option, csvRows, tot, nFiltered: filtered.length, hasProvisional: provisional.some(Boolean), isEmpty: filtered.length === 0 }
-  }, [emails.data, grain, slaDays, slaStart, slaEnd, thresholdH, assignees, firstOnly, excludeFin, excludeXometry, mode])
+  }, [emails.data, grain, slaDays, slaStart, slaEnd, thresholdH, assignees, firstOnly, excludeFin, excludeXometry, excludeClosedNoReply, mode])
 
   const t = model.tot
   const toggle = (checked: boolean, set: (v: boolean) => void, label: string) => (
@@ -228,7 +230,7 @@ export default function CsPage() {
         subtitle={`% of inbound customer emails answered by a human within ${thresholdH} business hour${thresholdH === 1 ? '' : 's'} (${slaStart}–${slaEnd} ET)`}
         info={{
           definition:
-            'Every inbound customer email (customer-initiated EMAIL conversations from Intercom — Messenger chats and outbound emails are out of scope), bucketed by arrival period. An email counts as answered within SLA when the first HUMAN teammate reply after it lands within the threshold, counting only time inside the configured business window (ET). Fin/bot replies never stop the clock; internal notes don\'t count. Unanswered emails count in the denominator (recent periods start low and climb as replies land) — ones still under the threshold are "pending" and can still convert. "First email only" keeps just each conversation\'s opening email. "Exclude Fin-resolved" drops conversations Fin answered/closed with no human reply ever. Xometry = any sender @*.xometry.com. Assignment is conversation-level. The global date range and grain apply; channel/material filters do not.',
+            'Every inbound customer email (customer-initiated EMAIL conversations from Intercom — Messenger chats and outbound emails are out of scope), bucketed by arrival period. An email counts as answered within SLA when the first HUMAN teammate reply after it lands within the threshold, counting only time inside the configured business window (ET). Fin/bot replies never stop the clock; internal notes don\'t count. Unanswered emails count in the denominator (recent periods start low and climb as replies land) — ones still under the threshold are "pending" and can still convert. "Exclude closed without reply" drops emails a TEAMMATE closed without replying to (an explicit no-response-needed disposition, e.g. a final thank-you note); bot or auto-closes never qualify, so real misses can\'t be hidden by inactivity auto-close. "First email only" keeps just each conversation\'s opening email. "Exclude Fin-resolved" drops conversations Fin answered/closed with no human reply ever. Xometry = any sender @*.xometry.com. Assignment is conversation-level. The global date range and grain apply; channel/material filters do not.',
           source: emails.data?.meta.source ?? 'Intercom API (api.intercom.io)',
         }}
         csvRows={model.csvRows}
@@ -305,6 +307,7 @@ export default function CsPage() {
           {toggle(firstOnly, setFirstOnly, 'First email of thread only')}
           {toggle(excludeFin, setExcludeFin, 'Exclude Fin-resolved')}
           {toggle(excludeXometry, setExcludeXometry, 'Exclude Xometry')}
+          {toggle(excludeClosedNoReply, setExcludeClosedNoReply, 'Exclude closed without reply')}
         </div>
         {model.isEmpty ? (
           <EmptyState text="No inbound emails match the filters in this range — loosen a filter above or widen the date range." />
