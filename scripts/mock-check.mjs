@@ -39,7 +39,6 @@ const CASES = [
   ['bowler_rma', range],
   ['bowler_labor', range],
   ['problem_orders', { channels: [] }],
-  ['predictor_features', { channels: [] }],
   ['floor_stations', {}],
   ['floor_station_throughput', { ...range, includeExcluded: false, stations: [] }],
   ['floor_station_throughput', { ...range, includeExcluded: false, stations: ['Finishing 1'] }],

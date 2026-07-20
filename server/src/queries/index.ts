@@ -4,7 +4,6 @@ import { shipmentQueries } from './shipments.js'
 import { wipQueries } from './wip.js'
 import { orderQueries } from './orders.js'
 import { floorQueries } from './floor.js'
-import { predictorQueries } from './predictor.js'
 import { bowlerQueries } from './bowler.js'
 
 export const registry: QueryRegistry = {
@@ -13,6 +12,5 @@ export const registry: QueryRegistry = {
   ...wipQueries,
   ...orderQueries,
   ...floorQueries,
-  ...predictorQueries,
   ...bowlerQueries,
 }

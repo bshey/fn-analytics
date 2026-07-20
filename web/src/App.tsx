@@ -6,7 +6,6 @@ import ShipmentsPage from './modules/shipments'
 import WipPage from './modules/wip'
 import OrdersPage from './modules/orders'
 import FloorPage from './modules/floor'
-import PredictorPage from './modules/predictor'
 import CsPage from './modules/cs'
 import NpsPage from './modules/nps'
 import BowlerPage from './modules/bowler'
@@ -33,7 +32,6 @@ export default function App() {
               <Route path="/wip" element={<WipPage />} />
               <Route path="/orders" element={<OrdersPage />} />
               <Route path="/floor" element={<FloorPage />} />
-              <Route path="/predictor" element={<PredictorPage />} />
               <Route path="/cs" element={<CsPage />} />
               <Route path="/nps" element={<NpsPage />} />
               <Route path="/bowler" element={<BowlerPage />} />
