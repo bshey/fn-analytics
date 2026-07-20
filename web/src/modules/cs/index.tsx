@@ -107,6 +107,7 @@ export default function CsPage() {
   const [firstOnly, setFirstOnly] = useState(false)
   const [excludeFin, setExcludeFin] = useState(true)
   const [excludeXometry, setExcludeXometry] = useState(true)
+  const [excludeFormlabs, setExcludeFormlabs] = useState(false)
   const [excludeClosedNoReply, setExcludeClosedNoReply] = useState(true)
   const [mode, setMode] = useState<Mode>('pct')
 
@@ -128,6 +129,7 @@ export default function CsPage() {
 
     const filtered = rows.filter((r) => {
       if (excludeXometry && r.xometry) return false
+      if (excludeFormlabs && /@(?:[a-z0-9-]+\.)*formlabs\.com$/i.test(String(r.sender ?? ''))) return false
       if (excludeFin && r.fin_resolved) return false
       if (excludeClosedNoReply && r.closed_no_reply) return false
       if (firstOnly && !r.first) return false
@@ -232,7 +234,7 @@ export default function CsPage() {
 
     const itemsByPeriod = new Map(periods.map((p) => [p, byPeriod.get(p)!.items]))
     return { option, csvRows, tot, periods, itemsByPeriod, hasProvisional: provisional.some(Boolean), isEmpty: filtered.length === 0 }
-  }, [emails.data, grain, slaDays, slaStart, slaEnd, thresholdH, assignees, firstOnly, excludeFin, excludeXometry, excludeClosedNoReply, mode])
+  }, [emails.data, grain, slaDays, slaStart, slaEnd, thresholdH, assignees, firstOnly, excludeFin, excludeXometry, excludeFormlabs, excludeClosedNoReply, mode])
 
   const [modalPeriod, setModalPeriod] = useState<string | null>(null)
   const onBarClick = (params: unknown) => {
@@ -309,7 +311,7 @@ export default function CsPage() {
         subtitle={`% of inbound customer emails answered by a human within ${thresholdH} business hour${thresholdH === 1 ? '' : 's'} (${slaStart}–${slaEnd} ET)`}
         info={{
           definition:
-            'Every inbound customer email (customer-initiated EMAIL conversations from Intercom — Messenger chats and outbound emails are out of scope), bucketed by arrival period. An email counts as answered within SLA when the first HUMAN teammate reply after it lands within the threshold, counting only time inside the configured business window (ET). Fin/bot replies never stop the clock; internal notes don\'t count. Unanswered emails count in the denominator (recent periods start low and climb as replies land) — ones still under the threshold are "pending" and can still convert. "Exclude closed without reply" drops emails a TEAMMATE closed without replying to (an explicit no-response-needed disposition, e.g. a final thank-you note); bot or auto-closes never qualify, so real misses can\'t be hidden by inactivity auto-close. "First email only" keeps just each conversation\'s opening email. "Exclude Fin-resolved" drops conversations Fin answered/closed with no human reply ever. Xometry = any sender @*.xometry.com. Assignment is conversation-level. The global date range and grain apply; channel/material filters do not.',
+            'Every inbound customer email (customer-initiated EMAIL conversations from Intercom — Messenger chats and outbound emails are out of scope), bucketed by arrival period. An email counts as answered within SLA when the first HUMAN teammate reply after it lands within the threshold, counting only time inside the configured business window (ET). Fin/bot replies never stop the clock; internal notes don\'t count. Unanswered emails count in the denominator (recent periods start low and climb as replies land) — ones still under the threshold are "pending" and can still convert. "Exclude closed without reply" drops emails a TEAMMATE closed without replying to (an explicit no-response-needed disposition, e.g. a final thank-you note); bot or auto-closes never qualify, so real misses can\'t be hidden by inactivity auto-close. "First email only" keeps just each conversation\'s opening email. "Exclude Fin-resolved" drops conversations Fin answered/closed with no human reply ever. Xometry = any sender @*.xometry.com; "Exclude Formlabs senders" drops @*.formlabs.com senders (mostly sales@ forwarding customer emails in — roughly 40% of inbound, so expect volumes to drop when enabled). Assignment is conversation-level. The global date range and grain apply; channel/material filters do not.',
           source: emails.data?.meta.source ?? 'Intercom API (api.intercom.io)',
         }}
         csvRows={model.csvRows}
@@ -386,6 +388,7 @@ export default function CsPage() {
           {toggle(firstOnly, setFirstOnly, 'First email of thread only')}
           {toggle(excludeFin, setExcludeFin, 'Exclude Fin-resolved')}
           {toggle(excludeXometry, setExcludeXometry, 'Exclude Xometry')}
+          {toggle(excludeFormlabs, setExcludeFormlabs, 'Exclude Formlabs senders')}
           {toggle(excludeClosedNoReply, setExcludeClosedNoReply, 'Exclude closed without reply')}
         </div>
         {model.isEmpty ? (
