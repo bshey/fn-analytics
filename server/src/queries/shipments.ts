@@ -465,6 +465,70 @@ ORDER BY period, breakdown`
   },
 
   /**
+   * Late ships × production issues — of the orders that shipped LATE in each
+   * period, how many hit an issue (build failure / reprint / quarantine /
+   * mfg issue / QC-fail lot routing) during production? On-time counts ride
+   * along so the UI can show the baseline issue rate for contrast.
+   */
+  ship_late_issues: {
+    description:
+      "Shipped orders per ACTUAL ship period split by late vs on-time (governed channel-aware due date; late = shipped at least 1 calendar day after it) and whether the order hit a production issue: any TOTAL_BUILD_FAILURE / PART_NEEDS_REPRINT / PART_QUARANTINED / MANUFACTURING_ISSUE order event, or any station-app QC-fail quarantine routing (Quarantine - Routing / QUARANTINED lot event; station events exist since 2026-07-02 — earlier periods rely on order events alone, so issue rates read slightly lower before go-live). late_with_issue ÷ late_orders = share of late ships that had a recorded issue; ontime_with_issue ÷ ontime_orders is the baseline for contrast. Channel, material and mfg-type filters all apply (material/type match any part on the order).",
+    source: 'fcm_api_order + fcm_api_orderevent + manufacturing_events (station app) (+ medusa order for channel classification)',
+    params: zBaseFilters,
+    sql: (p, ctx) => `
+WITH ${classifiedOrdersCTEs(
+      `o.status = 'SHIPPED' AND o.shipped_at IS NOT NULL AND o.ship_by IS NOT NULL
+    AND DATE(o.shipped_at) BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}
+    AND DATE(o.shipped_at) <= CURRENT_DATE()`,
+      ctx.exclusions.revenueSentinelBillingId,
+    )},
+iss AS (
+  SELECT DISTINCT order_id FROM ${T.orderEvent}
+  WHERE event_type IN ('TOTAL_BUILD_FAILURE', 'PART_NEEDS_REPRINT', 'PART_QUARANTINED', 'MANUFACTURING_ISSUE')
+    AND order_id IN (SELECT id FROM classified)
+  UNION DISTINCT
+  SELECT DISTINCT order_id FROM ${T.mfgEvent}
+  WHERE source = 'STATION_APP' AND event_type IN ('Quarantine - Routing', 'QUARANTINED')
+    AND order_id IN (SELECT id FROM classified)
+),
+base AS (
+  SELECT c.id, c.reporting_category,
+         DATE(c.shipped_at) AS ship_date,
+         DATE_DIFF(DATE(c.shipped_at), ${governedDueDateExpr('c')}, DAY) > 0 AS late,
+         i.order_id IS NOT NULL AS has_issue
+  FROM classified c
+  LEFT JOIN iss i ON i.order_id = c.id
+)
+SELECT CAST(${grainExpr('ship_date', p.grain)} AS STRING) AS period,
+       COUNTIF(late) AS late_orders,
+       COUNTIF(late AND has_issue) AS late_with_issue,
+       COUNTIF(NOT late) AS ontime_orders,
+       COUNTIF(NOT late AND has_issue) AS ontime_with_issue
+FROM base
+WHERE TRUE ${classifiedChannelFilter(p.channels)}
+  ${orderPartFilters(p, 'base')}
+GROUP BY period
+ORDER BY period`,
+    mock: (p) => {
+      const r = rng(`lateiss:${p.grain}`)
+      const scale = p.grain === 'day' ? 1 / 7 : p.grain === 'week' ? 1 : p.grain === 'month' ? 4.3 : p.grain === 'quarter' ? 13 : 52
+      const rows: Row[] = []
+      for (const period of periodsBetween(p.start, p.end, p.grain)) {
+        const late = Math.max(1, Math.round((25 + r() * 40) * scale))
+        const ontime = Math.max(2, Math.round((140 + r() * 60) * scale))
+        rows.push({
+          period,
+          late_orders: late,
+          late_with_issue: Math.round(late * (0.35 + r() * 0.35)),
+          ontime_orders: ontime,
+          ontime_with_issue: Math.round(ontime * (0.1 + r() * 0.15)),
+        })
+      }
+      return rows
+    },
+  },
+
+  /**
    * Ship-timing distribution (spec §8.3, corrected for the governed due-date rule).
    * Order-level calendar-day buckets vs the channel-aware promised ship date,
    * grouped period × channel × bucket. Periods are ACTUAL ship weeks.

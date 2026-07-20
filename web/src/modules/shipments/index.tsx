@@ -1,4 +1,5 @@
 import { DeliveryTrend } from './DeliveryTrend'
+import { LateIssues } from './LateIssues'
 import { MetricsExplorer } from './MetricsExplorer'
 import { OnTimeKpis } from './OnTimeKpis'
 import { OnTimeTrend } from './OnTimeTrend'
@@ -25,7 +26,10 @@ export default function ShipmentsPage() {
           <TimingDistribution />
         </div>
         <div className="grid gap-3 xl:grid-cols-2">
+          <LateIssues />
           <DeliveryTrend />
+        </div>
+        <div className="grid gap-3 xl:grid-cols-2">
           <WorstPerformers />
         </div>
       </section>

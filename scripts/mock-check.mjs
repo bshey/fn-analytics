@@ -16,6 +16,7 @@ const CASES = [
   ['shipments_explorer', { ...range, breakdown: 'materials' }],
   ['orders_explorer', { ...range, breakdown: 'none' }],
   ['ship_timing_distribution', range],
+  ['ship_late_issues', range],
   ['wip_snapshot', { channels: [] }],
   ['wip_event_trends', { ...range, family: 'order' }],
   ['wip_event_trends', { ...range, family: 'build' }],
