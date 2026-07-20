@@ -262,12 +262,14 @@ export default function CsPage() {
       id: 'email_at',
       accessorFn: (r) => num0(r.email_at),
       cell: ({ row }) => fmtDateTime(new Date(num0(row.original.email_at) * 1000).toISOString()),
+      meta: { className: 'whitespace-nowrap' },
     },
     { header: 'Sender', accessorKey: 'sender', cell: ({ row }) => String(row.original.sender || '—') },
     {
       header: 'Subject',
       accessorKey: 'subject',
       cell: ({ row }) => <span className="block max-w-[26rem] truncate" title={String(row.original.subject)}>{String(row.original.subject)}</span>,
+      meta: { className: 'w-full' },
     },
     {
       header: 'Response (biz h)',
@@ -558,6 +560,7 @@ function CsatCard({ adminsById }: { adminsById: Map<string, string> }) {
       id: 'rated_at',
       accessorFn: (r) => num0(r.rated_at),
       cell: ({ row }) => fmtDateTime(new Date(num0(row.original.rated_at) * 1000).toISOString()),
+      meta: { className: 'whitespace-nowrap' },
     },
     {
       header: 'Score',
@@ -579,6 +582,7 @@ function CsatCard({ adminsById }: { adminsById: Map<string, string> }) {
       header: 'Remark',
       accessorKey: 'remark',
       cell: ({ row }) => <HoverReveal text={String(row.original.remark ?? '')} className="block max-w-[22rem] truncate" />,
+      meta: { className: 'w-full' },
     },
     {
       header: '',

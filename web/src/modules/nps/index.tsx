@@ -126,6 +126,7 @@ export default function NpsPage() {
         id: 'recorded_at',
         accessorFn: (r) => num0(r.recorded_at),
         cell: ({ row }) => fmtDateTime(new Date(num0(row.original.recorded_at) * 1000).toISOString()),
+        meta: { className: 'whitespace-nowrap' },
       },
       {
         header: 'Score',
@@ -191,7 +192,8 @@ export default function NpsPage() {
       {
         header: 'Comment',
         accessorKey: 'comment',
-        cell: ({ row }) => <HoverReveal text={String(row.original.comment ?? '')} />,
+        cell: ({ row }) => <HoverReveal text={String(row.original.comment ?? '')} className="block max-w-[42rem] truncate" />,
+        meta: { className: 'w-full' },
       },
       {
         header: 'Photo',

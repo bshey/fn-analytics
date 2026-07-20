@@ -24,7 +24,9 @@ interface Props<T> {
 
 /**
  * Sortable data table (TanStack v8). Column meta: { align: 'right' } right-aligns
- * with tabular figures — use for every numeric column.
+ * with tabular figures — use for every numeric column. meta.className is applied
+ * to the column's th and td — use 'whitespace-nowrap' for dates and 'w-full' on
+ * ONE flexible column to make it absorb the table's slack width.
  */
 export function DataTable<T>({ data, columns, initialSort = [], csvName, maxRows, fit = false, onRowClick, emptyText = 'No rows.' }: Props<T>) {
   const [sorting, setSorting] = useState<SortingState>(initialSort)
@@ -60,14 +62,15 @@ export function DataTable<T>({ data, columns, initialSort = [], csvName, maxRows
             {table.getHeaderGroups().map((hg) => (
               <tr key={hg.id}>
                 {hg.headers.map((h) => {
-                  const align = (h.column.columnDef.meta as { align?: string } | undefined)?.align
+                  const meta = h.column.columnDef.meta as { align?: string; className?: string } | undefined
+                  const align = meta?.align
                   return (
                     <th
                       key={h.id}
                       onClick={h.column.getToggleSortingHandler()}
                       className={`cursor-pointer select-none border-b border-line bg-[#fafbfc] px-3 py-2 text-[11px] font-medium uppercase tracking-wide text-sub ${
                         align === 'right' ? 'text-right' : 'text-left'
-                      }`}
+                      } ${meta?.className ?? ''}`}
                     >
                       {flexRender(h.column.columnDef.header, h.getContext())}
                       {h.column.getIsSorted() === 'asc' ? ' ↑' : h.column.getIsSorted() === 'desc' ? ' ↓' : ''}
@@ -85,11 +88,12 @@ export function DataTable<T>({ data, columns, initialSort = [], csvName, maxRows
                 onClick={onRowClick ? () => onRowClick(row.original) : undefined}
               >
                 {row.getVisibleCells().map((cell) => {
-                  const align = (cell.column.columnDef.meta as { align?: string } | undefined)?.align
+                  const meta = cell.column.columnDef.meta as { align?: string; className?: string } | undefined
+                  const align = meta?.align
                   return (
                     <td
                       key={cell.id}
-                      className={`px-3 py-1.5 ${align === 'right' ? 'text-right tabular-nums' : 'text-left'}`}
+                      className={`px-3 py-1.5 ${align === 'right' ? 'text-right tabular-nums' : 'text-left'} ${meta?.className ?? ''}`}
                     >
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
                     </td>
