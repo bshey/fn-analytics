@@ -308,6 +308,45 @@ interface RmaTicket {
   ticket_attributes?: Record<string, unknown>
 }
 
+interface TicketPartAttachment {
+  content_type?: string
+  name?: string
+  url?: string
+}
+
+interface TicketDetail {
+  ticket_parts?: { ticket_parts?: { attachments?: TicketPartAttachment[] }[] }
+}
+
+/**
+ * Image attachments on a ticket's thread (customers reply with photos; the
+ * ticket types have no file attribute). Attachment URLs are SIGNED and expire
+ * within hours, so results must not be cached beyond the route's short TTL —
+ * every fetch re-derives fresh URLs.
+ */
+async function fetchTicketPhotos(ticketId: string): Promise<{ name: string; url: string }[]> {
+  try {
+    const full = await ic<TicketDetail>(`/tickets/${ticketId}`)
+    const photos: { name: string; url: string }[] = []
+    // Email attachments repeat across parts (message + quoted reply) — dedupe
+    // by filename, which can also fold distinct "image.png" pastes; acceptable,
+    // the thumbnail is a pointer and the full thread is one click away.
+    const seen = new Set<string>()
+    for (const p of full.ticket_parts?.ticket_parts ?? []) {
+      for (const a of p.attachments ?? []) {
+        if (!(a.content_type ?? '').startsWith('image/') || !a.url) continue
+        const name = a.name ?? 'image'
+        if (seen.has(name)) continue
+        seen.add(name)
+        photos.push({ name, url: a.url })
+      }
+    }
+    return photos
+  } catch {
+    return [] // photo enrichment is best-effort; never fail the ticket list
+  }
+}
+
 export async function fetchRmaTickets(start: string, end: string): Promise<Row[]> {
   const startTs = Math.floor(new Date(`${start}T00:00:00-05:00`).getTime() / 1000)
   // RMAs are SHIP-DATE cohorted downstream: a ticket for an order shipped in
@@ -353,6 +392,15 @@ export async function fetchRmaTickets(start: string, end: string): Promise<Row[]
       if (!startingAfter) break
     }
   }
+  // Photo evidence from each ticket's thread (one GET per ticket, pooled).
+  const photosById = new Map(
+    await pool(rows, 8, async (r) => [r.ticket_id as string, await fetchTicketPhotos(r.ticket_id as string)] as const),
+  )
+  for (const r of rows) {
+    const photos = photosById.get(r.ticket_id as string) ?? []
+    r.photos = photos
+    r.photo_count = photos.length
+  }
   // Resolve origin orders' ship dates for cohorting (degrades without VPN).
   const ids = [...new Set(rows.map((r) => r.origin_order_id).filter((v): v is number => typeof v === 'number'))]
   if (ids.length) {
@@ -370,6 +418,10 @@ export async function fetchRmaTickets(start: string, end: string): Promise<Row[]
   return rows.sort((a, b) => (b.created_at as number) - (a.created_at as number))
 }
 
+const MOCK_PHOTO_URL = `data:image/svg+xml,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect width="80" height="80" fill="#d8d3c8"/><circle cx="40" cy="42" r="16" fill="none" stroke="#898781" stroke-width="4"/><rect x="22" y="18" width="36" height="10" rx="3" fill="#898781"/></svg>',
+)}`
+
 export function mockRmaTickets(start: string, end: string): Row[] {
   const r = rng(`rmat:${start}:${end}`)
   const rows: Row[] = []
@@ -380,6 +432,7 @@ export function mockRmaTickets(start: string, end: string): Row[] {
     const n = 1 + Math.round(r())
     for (let i = 0; i < n; i++) {
       const createdAt = Math.floor(new Date(`${day}T00:00:00Z`).getTime() / 1000) + 14 * 3600 + Math.round(r() * 6 * 3600)
+      const nPhotos = r() < 0.4 ? 1 + Math.floor(r() * 4) : 0
       rows.push({
         ticket_id: String(id),
         rma_type: r() < 0.5 ? 'Form Now' : 'Xometry',
@@ -389,6 +442,8 @@ export function mockRmaTickets(start: string, end: string): Row[] {
         origin_order_id: 17000 + id - 5000,
         origin_shipped_at: new Date((createdAt - Math.round((2 + r() * 14) * 86400)) * 1000).toISOString().slice(0, 10),
         rma_order_id: r() < 0.7 ? 21000 + id - 5000 : null,
+        photos: Array.from({ length: nPhotos }, (_, p) => ({ name: `IMG_${1000 + p}.jpg`, url: MOCK_PHOTO_URL })),
+        photo_count: nPhotos,
         url: '',
       })
       id++

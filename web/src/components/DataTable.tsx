@@ -14,6 +14,8 @@ interface Props<T> {
   columns: ColumnDef<T, any>[]
   initialSort?: SortingState
   csvName?: string
+  /** CSV rows override when raw data has non-scalar fields (defaults to data). */
+  csvRows?: Record<string, unknown>[]
   /** Cap rendered rows (table still exports everything). */
   maxRows?: number
   /** Fit the page width — wrap cell content instead of scrolling horizontally inside the card. */
@@ -28,7 +30,7 @@ interface Props<T> {
  * to the column's th and td — use 'whitespace-nowrap' for dates and 'w-full' on
  * ONE flexible column to make it absorb the table's slack width.
  */
-export function DataTable<T>({ data, columns, initialSort = [], csvName, maxRows, fit = false, onRowClick, emptyText = 'No rows.' }: Props<T>) {
+export function DataTable<T>({ data, columns, initialSort = [], csvName, csvRows, maxRows, fit = false, onRowClick, emptyText = 'No rows.' }: Props<T>) {
   const [sorting, setSorting] = useState<SortingState>(initialSort)
   const table = useReactTable({
     data,
@@ -50,7 +52,7 @@ export function DataTable<T>({ data, columns, initialSort = [], csvName, maxRows
         <div className="mb-1.5 flex justify-end">
           <button
             className="btn !px-2 !py-1 text-[11.5px]"
-            onClick={() => downloadCsv(csvName, data as Record<string, unknown>[])}
+            onClick={() => downloadCsv(csvName, csvRows ?? (data as Record<string, unknown>[]))}
           >
             CSV
           </button>

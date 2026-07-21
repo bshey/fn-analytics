@@ -208,7 +208,31 @@ export default function RmaPage() {
           )
         },
       },
-      { header: 'State', accessorKey: 'state' },
+      {
+        header: 'Photos',
+        id: 'photos',
+        accessorFn: (r) => (Array.isArray(r.photos) ? r.photos.length : 0),
+        cell: ({ row }) => {
+          const photos = (Array.isArray(row.original.photos) ? row.original.photos : []) as { name: string; url: string }[]
+          if (!photos.length) return <span className="text-faint">—</span>
+          return (
+            <span className="flex items-center gap-1">
+              {photos.slice(0, 3).map((p, i) => (
+                <a key={i} href={p.url} target="_blank" rel="noreferrer" title={p.name}>
+                  <img
+                    src={p.url}
+                    alt={p.name}
+                    loading="lazy"
+                    className="h-8 w-8 rounded border border-line object-cover hover:opacity-80"
+                  />
+                </a>
+              ))}
+              {photos.length > 3 && <span className="text-[11px] font-medium text-sub">+{photos.length - 3}</span>}
+            </span>
+          )
+        },
+        meta: { className: 'whitespace-nowrap' },
+      },
       {
         header: '',
         id: 'open',
@@ -225,6 +249,8 @@ export default function RmaPage() {
 
   const allTickets = (tickets.data?.rows ?? []) as Row[]
   const modalItems = modalPeriod ? (model.byPeriod.get(modalPeriod)?.items ?? []) : []
+  // CSV: the photos array would serialize as [object Object] — export the count.
+  const ticketCsvRows = useMemo(() => allTickets.map(({ photos: _photos, ...rest }) => rest), [allTickets])
 
   return (
     <div className="space-y-3">
@@ -286,10 +312,10 @@ export default function RmaPage() {
         subtitle="Every RMA ticket in the selected range, newest first"
         info={{
           definition:
-            'All "Form Now RMA" and "Xometry RMA" Intercom tickets created in the global date range: title (hover for full text), the origin order and the reprint/RMA order (both open MES in a new tab), ticket state, and a link to the ticket in Intercom.',
+            'All "Form Now RMA" and "Xometry RMA" Intercom tickets created in the global date range: title (hover for full text), the origin order and the reprint/RMA order (both open MES in a new tab), photo evidence, and a link to the ticket in Intercom. Photos are image attachments from the ticket thread (these ticket types have no photo field, so this is whatever the customer or team attached — many tickets legitimately have none; the structured photo capture on the back-office RMA Submission form lapsed Jun 23, 2026). Thumbnails open full-size in a new tab; the links are signed by Intercom and expire after a few hours — reload the page if an old one stops working.',
           source: 'Intercom tickets',
         }}
-        csvRows={allTickets}
+        csvRows={ticketCsvRows}
         csvName="rma-tickets"
         isLoading={tickets.isLoading}
         isFetching={tickets.isFetching}
@@ -298,12 +324,19 @@ export default function RmaPage() {
         emptyText="No RMA tickets in the selected range."
         height={480}
       >
-        <DataTable data={allTickets} columns={ticketColumns} initialSort={[{ id: 'created_at', desc: true }]} csvName="rma-tickets" fit />
+        <DataTable data={allTickets} columns={ticketColumns} initialSort={[{ id: 'created_at', desc: true }]} csvName="rma-tickets" csvRows={ticketCsvRows} fit />
       </ChartCard>
 
       {modalPeriod && (
         <Modal title={`RMA tickets — ${periodLabel(modalPeriod, grain)} (${fmtInt(modalItems.length)})`} onClose={() => setModalPeriod(null)}>
-          <DataTable data={modalItems} columns={ticketColumns} initialSort={[{ id: 'created_at', desc: false }]} csvName={`rma-${modalPeriod}`} fit />
+          <DataTable
+            data={modalItems}
+            columns={ticketColumns}
+            initialSort={[{ id: 'created_at', desc: false }]}
+            csvName={`rma-${modalPeriod}`}
+            csvRows={modalItems.map(({ photos: _photos, ...rest }) => rest)}
+            fit
+          />
         </Modal>
       )}
     </div>
