@@ -24,6 +24,9 @@ export const config = {
   qualtricsDatacenter: process.env.QUALTRICS_DATACENTER ?? 'iad1',
   qualtricsNpsSurvey: process.env.QUALTRICS_NPS_SURVEY_ID ?? '',
   port: Number(process.env.PORT ?? 4600),
+  // 127.0.0.1 = this machine only (default). Set HOST=0.0.0.0 in .env to let
+  // others on the same network open the app at http://<your-ip>:4600.
+  host: process.env.HOST ?? '127.0.0.1',
   mock: process.env.MOCK === '1',
   isProd: process.env.NODE_ENV === 'production',
 }
