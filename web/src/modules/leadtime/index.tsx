@@ -373,7 +373,16 @@ export default function LeadTimePage() {
                     {t.rec}
                   </button>
                 ) : (
-                  <span className="text-faint" title="Fewer than 3 constrained orders in this window">—</span>
+                  <span
+                    className="text-faint"
+                    title={
+                      t && t.n === 0 && idx === 0
+                        ? 'No orders were constrained by this tier ALONE — the bottom rung always ties with the other table (both give the same days), so those orders live in the Count/volume ties panel. Change both tables to move them.'
+                        : 'Fewer than 3 orders were constrained by this tier in the selected window — widen the window for a recommendation.'
+                    }
+                  >
+                    —
+                  </span>
                 )}
               </td>
               <td className={`whitespace-nowrap px-2 py-1 text-right tabular-nums ${danger ? 'text-bad' : slack ? 'text-good' : 'text-sub'}`}>
