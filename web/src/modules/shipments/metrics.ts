@@ -84,6 +84,31 @@ export const BOOKINGS_METRIC: MetricDef = {
 }
 
 /**
+ * Orders placed / parts ordered — order-placed cohort (submitted date). Offered
+ * on both cohort toggles like Bookings; always route to the order-placed query,
+ * so from the ship cohort they show demand next to the shipping metrics.
+ */
+export const ORDERS_PLACED_METRIC: MetricDef = {
+  key: 'orders_placed',
+  label: 'Orders placed',
+  kind: 'count',
+  compute: field('orders_placed'),
+  weight: field('orders_placed'),
+  format: fmtInt,
+  route: 'placed',
+}
+
+export const PARTS_ORDERED_METRIC: MetricDef = {
+  key: 'parts_ordered',
+  label: 'Parts ordered',
+  kind: 'count',
+  compute: field('parts_ordered'),
+  weight: field('parts_ordered'),
+  format: fmtInt,
+  route: 'placed',
+}
+
+/**
  * Same count, two calendars. "By due date" reads the governed KPI view (a bar =
  * orders DUE then that have shipped — no weekend bars, recent bars climb as
  * cohorts settle). "By ship date" reads its own raw-order query bucketed by
@@ -117,6 +142,7 @@ export const SHIP_METRICS: MetricDef[] = [
   },
   SHIP_ACTUAL_METRIC,
   { key: 'orders_due', label: 'Orders due', kind: 'count', compute: field('orders_due'), weight: field('orders_due'), format: fmtInt },
+  ORDERS_PLACED_METRIC,
   // Revenue = the governed formula recognized WHEN THE ORDER SHIPS. The view's
   // bookings_from_shipped_orders is identical to revenue (both gated on shipped),
   // so it is deliberately NOT offered — real Bookings (below) routes to the
@@ -124,6 +150,7 @@ export const SHIP_METRICS: MetricDef[] = [
   { key: 'revenue', label: 'Revenue $ (at ship)', kind: 'money', compute: field('revenue'), weight: field('revenue'), format: fmtMoney },
   BOOKINGS_METRIC,
   { key: 'parts', label: 'Parts shipped', kind: 'count', compute: field('parts'), weight: field('parts'), format: fmtInt },
+  PARTS_ORDERED_METRIC,
   { key: 'unique_parts', label: 'Unique parts shipped', kind: 'count', compute: field('unique_parts'), weight: field('unique_parts'), format: fmtInt },
   { key: 'volume_ml', label: 'Volume shipped (mL)', kind: 'volume', compute: field('volume_ml'), weight: field('volume_ml'), format: fmtVolume },
   // OTS convention (owner decision): denominator = ALL orders due in the period,
@@ -212,9 +239,9 @@ export const QUOTED_LEAD_METRIC: MetricDef = {
 }
 
 export const PLACED_METRICS: MetricDef[] = [
-  { key: 'orders_placed', label: 'Orders placed', kind: 'count', compute: field('orders_placed'), weight: field('orders_placed'), format: fmtInt },
+  ORDERS_PLACED_METRIC,
   BOOKINGS_METRIC,
-  { key: 'parts_ordered', label: 'Parts ordered', kind: 'count', compute: field('parts_ordered'), weight: field('parts_ordered'), format: fmtInt },
+  PARTS_ORDERED_METRIC,
   { key: 'unique_parts_ordered', label: 'Unique parts ordered', kind: 'count', compute: field('unique_parts_ordered'), weight: field('unique_parts_ordered'), format: fmtInt },
   { key: 'volume_ml_ordered', label: 'Volume ordered (mL)', kind: 'volume', compute: field('volume_ml_ordered'), weight: field('volume_ml_ordered'), format: fmtVolume },
 ]
