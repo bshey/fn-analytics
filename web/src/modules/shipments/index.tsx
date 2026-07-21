@@ -1,4 +1,5 @@
 import { DeliveryTrend } from './DeliveryTrend'
+import { Financials } from './Financials'
 import { LateIssues } from './LateIssues'
 import { MetricsExplorer } from './MetricsExplorer'
 import { OnTimeKpis } from './OnTimeKpis'
@@ -16,6 +17,10 @@ export default function ShipmentsPage() {
     <div className="space-y-6">
       <section className="space-y-3">
         <MetricsExplorer />
+      </section>
+
+      <section className="space-y-3">
+        <Financials />
       </section>
 
       <section className="space-y-3">
