@@ -7,6 +7,7 @@ import { fmtPct } from '../../lib/format'
 import { seriesColor } from '../../lib/palette'
 import { barDefaults, gridDefaults, lineDefaults, stackedBarDefaults } from '../../lib/echarts'
 import { ChartCard } from '../../components/ChartCard'
+import { MultiSelect } from '../../components/MultiSelect'
 import { DataTable } from '../../components/DataTable'
 import { EChart, type EChartHandle } from '../../components/EChart'
 import { Segmented } from '../../components/Segmented'
@@ -14,6 +15,8 @@ import {
   DELIVERY_FIELDS,
   OTD_1D_METRIC,
   OTD_METRIC,
+  PARTS_MED_FIELDS,
+  PARTS_MED_METRIC,
   SHIP_1D_METRIC,
   SHIP_DATE_FIELDS,
   SHIP_LATE_FIELDS,
@@ -35,6 +38,12 @@ import {
 } from './metrics'
 
 type StackMode = 'stacked' | 'grouped' | 'pct'
+
+/** Order-size decile options: 1 = smallest 10% of orders by part quantity. */
+const BUCKET_OPTIONS = Array.from({ length: 10 }, (_, i) => ({
+  value: String(i + 1),
+  label: `${i * 10}–${(i + 1) * 10}%`,
+}))
 
 interface BreakdownRow {
   label: string
@@ -58,11 +67,36 @@ export function MetricsExplorer() {
   const [stackMode, setStackMode] = useState<StackMode>('stacked')
   const chartRef = useRef<EChartHandle>(null)
 
-  const metrics = cohort === 'ship' ? [...SHIP_METRICS, SHIP_1D_METRIC, OTD_METRIC, OTD_1D_METRIC] : PLACED_METRICS
+  const metrics = cohort === 'ship' ? [...SHIP_METRICS, SHIP_1D_METRIC, OTD_METRIC, OTD_1D_METRIC, PARTS_MED_METRIC] : [...PLACED_METRICS, PARTS_MED_METRIC]
   const breakdowns = cohort === 'ship' ? SHIP_BREAKDOWNS : PLACED_BREAKDOWNS
   // Clamp state when the cohort toggle invalidates the current selection.
-  const metric: MetricDef = metrics.find((m) => m.key === metricKey) ?? metrics[0]
+  const baseMetric: MetricDef = metrics.find((m) => m.key === metricKey) ?? metrics[0]
   const breakdown = breakdowns.find((b) => b.value === breakdownKey) ?? breakdowns[0]
+
+  // Order-size decile filter (10 = largest 10% of orders by part quantity).
+  const [partsBuckets, setPartsBuckets] = useState<string[]>([])
+  const bucketsActive = partsBuckets.length > 0 && partsBuckets.length < 10
+  // The governed KPI view is pre-aggregated per day×category, so per-order
+  // filtering is impossible there. When the decile filter is active, the three
+  // headline ship-cohort metrics reroute to their raw-order twins
+  // (ship_late_kpis — validated to tie the view exactly); the remaining
+  // view-backed metrics show an "unfiltered" warning instead of lying.
+  const SHIPLATE_TWINS: Record<string, MetricDef> = {
+    orders_shipped: { ...baseMetric, key: 'orders_shipped', route: 'shiplate' },
+    orders_due: { ...baseMetric, key: 'orders_due', route: 'shiplate' },
+    on_time_pct: {
+      ...baseMetric,
+      key: 'on_time_pct',
+      route: 'shiplate',
+      compute: (s) => ((s.orders_due ?? 0) > 0 ? (s.shipped_on_time ?? 0) / s.orders_due : null),
+      parts: { num: 'shipped_on_time', den: 'orders_due' },
+    },
+  }
+  const metric: MetricDef =
+    bucketsActive && cohort === 'ship' && !baseMetric.route && SHIPLATE_TWINS[baseMetric.key]
+      ? SHIPLATE_TWINS[baseMetric.key]
+      : baseMetric
+  const bucketsIgnored = bucketsActive && cohort === 'ship' && !metric.route
 
   // Some metrics read their own query regardless of the active cohort toggle:
   // OTD → delivery_kpis (quoted-delivery cohort); Shipped ≤1d late →
@@ -70,18 +104,20 @@ export function MetricsExplorer() {
   // Orders shipped (by ship date) → shipped_by_ship_date (UTC ship-date buckets,
   // the legacy Looker convention); Bookings → orders_explorer (order-placed
   // cohort) so it always matches Looker.
-  const effCohort: 'delivery' | 'placed' | 'ship' | 'shiplate' | 'shipdate' =
+  const effCohort: 'delivery' | 'placed' | 'ship' | 'shiplate' | 'shipdate' | 'partsmed' =
     metric.route === 'delivery'
       ? 'delivery'
       : metric.route === 'shiplate'
         ? 'shiplate'
         : metric.route === 'shipdate'
           ? 'shipdate'
-          : metric.route === 'placed'
-            ? 'placed'
-            : cohort === 'ship'
-              ? 'ship'
-              : 'placed'
+          : metric.route === 'partsmed'
+            ? 'partsmed'
+            : metric.route === 'placed'
+              ? 'placed'
+              : cohort === 'ship'
+                ? 'ship'
+                : 'placed'
   const fields =
     effCohort === 'delivery'
       ? DELIVERY_FIELDS
@@ -89,9 +125,11 @@ export function MetricsExplorer() {
         ? SHIP_LATE_FIELDS
         : effCohort === 'shipdate'
           ? SHIP_DATE_FIELDS
-          : effCohort === 'placed'
-            ? PLACED_FIELDS
-            : SHIP_FIELDS
+          : effCohort === 'partsmed'
+            ? PARTS_MED_FIELDS
+            : effCohort === 'placed'
+              ? PLACED_FIELDS
+              : SHIP_FIELDS
   const queryName =
     effCohort === 'delivery'
       ? 'delivery_kpis'
@@ -99,10 +137,12 @@ export function MetricsExplorer() {
         ? 'ship_late_kpis'
         : effCohort === 'shipdate'
           ? 'shipped_by_ship_date'
-          : effCohort === 'placed'
-            ? 'orders_explorer'
-            : 'shipments_explorer'
-  const params = { ...queryParams, breakdown: breakdown.value }
+          : effCohort === 'partsmed'
+            ? 'parts_per_order'
+            : effCohort === 'placed'
+              ? 'orders_explorer'
+              : 'shipments_explorer'
+  const params = { ...queryParams, breakdown: breakdown.value, partsBuckets: partsBuckets.map(Number) }
   const q = useNamedQuery(queryName, params)
   const prior = priorRange(queryParams.start, queryParams.end)
   const qPrior = useNamedQuery(queryName, { ...params, start: prior.start, end: prior.end })
@@ -247,7 +287,12 @@ export function MetricsExplorer() {
   )
 
   const info =
-    effCohort === 'shipdate'
+    effCohort === 'partsmed'
+      ? {
+          definition: `Median ordered part quantity per order by ${queryParams.grain}, order-placed cohort (submitted_at, QUOTING excluded). Medians are computed in SQL per period and group; when groups fold into 'Other' or the window table spans periods, the shown value is the order-count-weighted average of group medians (an approximation — exact within any single period x group). Channel/material/mfg filters and the order-size percentile filter apply.`,
+          source: q.data?.meta.source ?? 'fcm_api_order + fcm_api_orderpart',
+        }
+      : effCohort === 'shipdate'
       ? {
           definition: `Orders shipped by ${queryParams.grain}, bucketed by the ACTUAL ship date (UTC calendar day) — the legacy Looker 'Orders Shipped' convention, and this series reproduces Looker's daily bars exactly. Weekend ships show under the weekend day. This differs from 'Orders shipped (by due date)' BY DESIGN: that series buckets by the governed promised-ship date, so the same order can land on a different day in each chart. Every shipped order appears exactly once under each convention — settled multi-week totals reconcile even though individual days differ. Channel, material and mfg-type filters all apply; breakdowns use the order's parts (multi-value orders roll up as 'Mixed').`,
           source: q.data?.meta.source ?? 'fcm_api_order (+ f_orders classification) + fcm_api_orderpart',
@@ -298,7 +343,8 @@ export function MetricsExplorer() {
       height={420}
       actions={
         <>
-          <select value={metric.key} onChange={(e) => setMetricKey(e.target.value)} title="Metric">
+          <MultiSelect label="Order size %ile" options={BUCKET_OPTIONS} selected={partsBuckets} onChange={setPartsBuckets} />
+          <select value={baseMetric.key} onChange={(e) => setMetricKey(e.target.value)} title="Metric">
             {metrics.map((m) => (
               <option key={m.key} value={m.key}>
                 {m.label}
@@ -328,6 +374,19 @@ export function MetricsExplorer() {
       }
     >
       <EChart ref={chartRef} option={model.option} height={320} />
+      {bucketsActive && bucketsIgnored && (
+        <p className="mt-1 rounded-md border border-warn/30 bg-amber-50 px-2 py-1 text-[11.5px] text-warn">
+          The order-size percentile filter is NOT applied to this metric — it reads the governed pre-aggregated view,
+          which has no per-order detail. Orders shipped, Orders due and On-time ship % switch to a raw-order
+          computation automatically; the other ship-cohort metrics show unfiltered values.
+        </p>
+      )}
+      {bucketsActive && !bucketsIgnored && (
+        <p className="mt-1 text-[11.5px] text-faint">
+          Order-size percentile filter active: {partsBuckets.length} of 10 deciles. Percentiles are computed over the
+          orders in the current window and cohort (by total ordered part quantity).
+        </p>
+      )}
       {model.hasProvisional && (
         <p className="mt-1 text-[11.5px] text-faint">
           Newest period is still in progress (shown faded) — warehouse data lags ~1 day.

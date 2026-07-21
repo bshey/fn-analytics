@@ -11,6 +11,7 @@ import {
   governedBookingsExpr,
   governedDueDateExpr,
   orderPartFilters,
+  partsDecileFilter,
 } from '../sql.js'
 import { rng, periodsBetween, truncPeriod, daysAgoIso, MOCK_CHANNELS, CHANNEL_WEIGHT, MOCK_MATERIALS, MOCK_MFG_TYPES } from '../mock/helpers.js'
 
@@ -133,12 +134,13 @@ ORDER BY period, breakdown`,
               : p.breakdown === 'manufacturing_types'
                 ? `IFNULL(op.manufacturing_types, 'Unknown')`
                 : `IFNULL(c.manufacturing_location, 'Unknown')`
+      const dec = partsDecileFilter(p.partsBuckets, 'classified')
       return `
 WITH ${classifiedOrdersCTEs(
         `o.status != 'QUOTING' AND o.submitted_at IS NOT NULL
     AND DATE(o.submitted_at) BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}`,
         ctx.exclusions.revenueSentinelBillingId,
-      )},
+      )}${dec.ctes},
 op AS (
   SELECT p.order_id,
          COUNT(DISTINCT p.part_file_id) AS n_unique_parts,
@@ -165,6 +167,7 @@ FROM classified c
 LEFT JOIN op ON op.order_id = c.id
 WHERE TRUE ${classifiedChannelFilter(p.channels, 'c')}
   ${orderPartFilters(p, 'c')}
+  ${dec.cond('c')}
 GROUP BY period, breakdown
 ORDER BY period, breakdown`
     },
@@ -204,6 +207,84 @@ ORDER BY period, breakdown`
   },
 
   /**
+   * Median parts per order — order-placed cohort. Medians can't be re-derived
+   * from summed counts, so the SQL computes them per period × breakdown; the
+   * client shows median_weighted ÷ n_orders, which is exact per cell and a
+   * weighted approximation when groups fold into 'Other' or span a window.
+   */
+  parts_per_order: {
+    description:
+      "Median ordered part quantity per order, per period × breakdown, order-placed cohort (submitted_at, QUOTING excluded). median_weighted = median × n_orders so the client can weight-average across folded groups and windows (exact for a single period×group cell; a weighted approximation of 'median of the union' otherwise). Orders with zero part rows are excluded. Channel/material/mfg filters and the order-size decile filter apply.",
+    source: 'fcm_api_order + fcm_api_orderpart (+ medusa order for channel classification)',
+    params: zOrdersExplorer,
+    sql: (p, ctx) => {
+      const breakdown =
+        p.breakdown === 'none'
+          ? `'All'`
+          : p.breakdown === 'reporting_category'
+            ? 'c.reporting_category'
+            : p.breakdown === 'materials'
+              ? `IFNULL(op.materials, 'Unknown')`
+              : p.breakdown === 'manufacturing_types'
+                ? `IFNULL(op.manufacturing_types, 'Unknown')`
+                : `IFNULL(c.manufacturing_location, 'Unknown')`
+      const dec = partsDecileFilter(p.partsBuckets, 'classified')
+      return `
+WITH ${classifiedOrdersCTEs(
+        `o.status != 'QUOTING' AND o.submitted_at IS NOT NULL
+    AND DATE(o.submitted_at) BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}`,
+        ctx.exclusions.revenueSentinelBillingId,
+      )}${dec.ctes},
+op AS (
+  SELECT p.order_id,
+         SUM(p.quantity) AS parts,
+         STRING_AGG(DISTINCT NULLIF(p.material, ''), ', ' ORDER BY NULLIF(p.material, '')) AS materials,
+         STRING_AGG(DISTINCT NULLIF(p.manufacturing_type, ''), ', ' ORDER BY NULLIF(p.manufacturing_type, '')) AS manufacturing_types
+  FROM ${T.orderPart} p
+  WHERE p.order_id IN (SELECT id FROM classified)
+  GROUP BY p.order_id
+)
+SELECT
+  CAST(${grainExpr('DATE(c.submitted_at)', p.grain)} AS STRING) AS period,
+  CAST(${breakdown} AS STRING) AS breakdown,
+  COUNT(*) AS n_orders,
+  APPROX_QUANTILES(op.parts, 100)[OFFSET(50)] AS median_parts,
+  APPROX_QUANTILES(op.parts, 100)[OFFSET(50)] * COUNT(*) AS median_weighted
+FROM classified c
+JOIN op ON op.order_id = c.id
+WHERE TRUE ${classifiedChannelFilter(p.channels, 'c')}
+  ${orderPartFilters(p, 'c')}
+  ${dec.cond('c')}
+GROUP BY period, breakdown
+ORDER BY period, breakdown`
+    },
+    mock: (p) => {
+      const r = rng(`ppo:${p.grain}:${p.breakdown}`)
+      const scale = p.grain === 'day' ? 1 / 7 : p.grain === 'week' ? 1 : p.grain === 'month' ? 4.3 : p.grain === 'quarter' ? 13 : 52
+      const groups =
+        p.breakdown === 'none'
+          ? ['All']
+          : p.breakdown === 'reporting_category'
+            ? [...(p.channels.length ? p.channels : MOCK_CHANNELS)]
+            : p.breakdown === 'materials'
+              ? MOCK_MATERIALS.map((m) => m.code)
+              : p.breakdown === 'manufacturing_types'
+                ? [...MOCK_MFG_TYPES]
+                : ['Somerville', 'Milwaukee']
+      const rows: Row[] = []
+      for (const period of periodsBetween(p.start, p.end, p.grain)) {
+        for (const g of groups) {
+          const w = p.breakdown === 'reporting_category' ? (CHANNEL_WEIGHT[g] ?? 0.1) : 1 / groups.length
+          const n = Math.max(1, Math.round((36 + r() * 44) * w * scale))
+          const median = Math.round(2 + r() * 8)
+          rows.push({ period, breakdown: g, n_orders: n, median_parts: median, median_weighted: median * n })
+        }
+      }
+      return rows
+    },
+  },
+
+  /**
    * On-time DELIVERY — cohorted by the quoted delivery date the customer saw
    * at checkout (medusa metadata.estimated_delivery_dates[shipping option]),
    * with delivery detected from ShipStation SHIPPING_UPDATE events (status DE).
@@ -223,6 +304,7 @@ ORDER BY period, breakdown`
             : p.breakdown === 'materials'
               ? `IFNULL(od.materials, 'Unknown')`
               : `IFNULL(od.manufacturing_types, 'Unknown')`
+      const dec = partsDecileFilter(p.partsBuckets, 'promwin')
       return `
 WITH ${classifiedOrdersCTEs(
         `o.status NOT IN ('CANCELLED', 'REJECTED', 'QUOTING')
@@ -259,7 +341,11 @@ delivered AS (
     AND UPPER(JSON_VALUE(event_data, '$.tracking_status.status_code')) = 'DE'
     AND DATE(timestamp) >= '2026-04-25'
   GROUP BY order_id
-)
+)${dec.ctes ? `,
+promwin AS (
+  SELECT id FROM promised
+  WHERE promised_delivery BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}
+)` : ''}${dec.ctes}
 SELECT
   CAST(${grainExpr('q.promised_delivery', p.grain)} AS STRING) AS period,
   CAST(${breakdown} AS STRING) AS breakdown,
@@ -272,6 +358,7 @@ LEFT JOIN op_dims od ON od.order_id = q.id
 LEFT JOIN delivered d ON d.order_id = q.id
 WHERE q.promised_delivery BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}
   ${classifiedChannelFilter(p.channels, 'q')}
+  ${dec.cond('q')}
 GROUP BY period, breakdown
 ORDER BY period, breakdown`
     },
@@ -324,6 +411,7 @@ ORDER BY period, breakdown`
             : p.breakdown === 'materials'
               ? `IFNULL(od.materials, 'Unknown')`
               : `IFNULL(od.manufacturing_types, 'Unknown')`
+      const dec = partsDecileFilter(p.partsBuckets, 'duewin')
       return `
 WITH ${classifiedOrdersCTEs(
         `o.status NOT IN ('CANCELLED', 'REJECTED', 'QUOTING')
@@ -345,7 +433,11 @@ due AS (
     ${governedDueDateExpr('c')} AS due_date,
     DATE(c.shipped_at) AS ship_date
   FROM classified c
-)
+)${dec.ctes ? `,
+duewin AS (
+  SELECT id FROM due
+  WHERE due_date BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)} AND due_date <= CURRENT_DATE()
+)` : ''}${dec.ctes}
 SELECT
   CAST(${grainExpr('q.due_date', p.grain)} AS STRING) AS period,
   CAST(${breakdown} AS STRING) AS breakdown,
@@ -358,6 +450,7 @@ LEFT JOIN op_dims od ON od.order_id = q.id
 WHERE q.due_date BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}
   AND q.due_date <= CURRENT_DATE()
   ${classifiedChannelFilter(p.channels, 'q')}
+  ${dec.cond('q')}
 GROUP BY period, breakdown
 ORDER BY period, breakdown`
     },
@@ -411,6 +504,7 @@ ORDER BY period, breakdown`
             : p.breakdown === 'materials'
               ? `IFNULL(od.materials, 'Unknown')`
               : `IFNULL(od.manufacturing_types, 'Unknown')`
+      const dec = partsDecileFilter(p.partsBuckets, 'classified')
       return `
 WITH ${classifiedOrdersCTEs(
         `o.status = 'SHIPPED' AND o.shipped_at IS NOT NULL
@@ -418,7 +512,7 @@ WITH ${classifiedOrdersCTEs(
     AND DATE(o.shipped_at) <= CURRENT_DATE()
     ${orderPartFilters(p)}`,
         ctx.exclusions.revenueSentinelBillingId,
-      )},
+      )}${dec.ctes},
 op_dims AS (
   SELECT order_id,
     STRING_AGG(DISTINCT NULLIF(material, ''), ', ' ORDER BY NULLIF(material, '')) AS materials,
@@ -434,6 +528,7 @@ SELECT
 FROM classified c
 LEFT JOIN op_dims od ON od.order_id = c.id
 WHERE TRUE ${classifiedChannelFilter(p.channels, 'c')}
+  ${dec.cond('c')}
 GROUP BY period, breakdown
 ORDER BY period, breakdown`
     },

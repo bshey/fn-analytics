@@ -20,7 +20,7 @@ export interface MetricDef {
   /** Extra tooltip context derived from the period's sums, e.g. "49 due · 15 unshipped". */
   tip?: (s: Sums) => string | null
   /** Metrics that read a different query than the active cohort's default. */
-  route?: 'delivery' | 'placed' | 'shiplate' | 'shipdate'
+  route?: 'delivery' | 'placed' | 'shiplate' | 'shipdate' | 'partsmed'
 }
 
 // Numeric fields returned by each explorer query (mock keys === SQL aliases).
@@ -52,6 +52,9 @@ export const DELIVERY_FIELDS = ['orders_due', 'delivered', 'delivered_on_time', 
 export const SHIP_LATE_FIELDS = ['orders_due', 'orders_shipped', 'shipped_on_time', 'shipped_max_1d_late'] as const
 
 export const SHIP_DATE_FIELDS = ['orders_shipped'] as const
+
+export const PARTS_MED_FIELDS = ['n_orders', 'median_parts', 'median_weighted'] as const
+
 
 const field =
   (f: string) =>
@@ -175,6 +178,21 @@ export const OTD_1D_METRIC: MetricDef = {
   format: (v) => fmtPct(v),
   parts: { num: 'delivered_max_1d_late', den: 'orders_due' },
   route: 'delivery',
+}
+
+/**
+ * Median parts per order — its own query (medians can't come from summed
+ * counts). Exact per period×group cell; weight-averaged when groups fold into
+ * 'Other' or the window table spans periods. Order-placed cohort.
+ */
+export const PARTS_MED_METRIC: MetricDef = {
+  key: 'median_parts_per_order',
+  label: 'Median parts per order',
+  kind: 'count',
+  compute: ratio('median_weighted', 'n_orders'),
+  weight: field('n_orders'),
+  format: (v) => fmtNum(v, 1),
+  route: 'partsmed',
 }
 
 export const PLACED_METRICS: MetricDef[] = [

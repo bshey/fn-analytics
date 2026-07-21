@@ -54,8 +54,38 @@ export const zBaseFilters = z.object({
   channels: zChannels,
   mfgTypes: zMfgTypes,
   materials: zMaterials,
+  /** Order-size decile filter: 1 = smallest 10% of orders by part quantity … 10 = largest. Empty = all. */
+  partsBuckets: z.array(z.number().int().min(1).max(10)).max(10).default([]),
 })
 export type BaseFilters = z.infer<typeof zBaseFilters>
+
+/**
+ * Order-size decile filter fragments. Deciles are NTILE(10) over each order's
+ * total ordered part quantity, computed WITHIN the given population CTE (a
+ * one-column `id` set), so "top 10%" means the top decile of the current
+ * window/cohort. Returns empty fragments when inactive (none or all selected).
+ */
+export function partsDecileFilter(
+  buckets: number[],
+  populationCte: string,
+): { ctes: string; cond: (alias: string) => string } {
+  const active = buckets.length > 0 && buckets.length < 10
+  if (!active) return { ctes: '', cond: () => '' }
+  const list = [...new Set(buckets)].join(', ')
+  return {
+    ctes: `,
+obk AS (
+  SELECT op.order_id, SUM(op.quantity) AS parts
+  FROM ${T.orderPart} op
+  WHERE op.order_id IN (SELECT id FROM ${populationCte})
+  GROUP BY op.order_id
+),
+odec AS (
+  SELECT order_id, NTILE(10) OVER (ORDER BY parts, order_id) AS decile FROM obk
+)`,
+    cond: (alias: string) => `AND ${alias}.id IN (SELECT order_id FROM odec WHERE decile IN (${list}))`,
+  }
+}
 
 // ---------- safe literal builders ----------
 
