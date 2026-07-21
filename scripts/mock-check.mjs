@@ -17,6 +17,7 @@ const CASES = [
   ['orders_explorer', { ...range, breakdown: 'none' }],
   ['ship_timing_distribution', range],
   ['parts_per_order', { ...range, breakdown: 'reporting_category' }],
+  ['quoted_lead_time', { ...range, breakdown: 'reporting_category' }],
   ['orders_explorer', { ...range, breakdown: 'none', partsBuckets: [9, 10] }],
   ['ship_late_issues', range],
   ['wip_snapshot', { channels: [] }],

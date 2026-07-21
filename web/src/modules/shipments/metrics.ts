@@ -20,7 +20,7 @@ export interface MetricDef {
   /** Extra tooltip context derived from the period's sums, e.g. "49 due · 15 unshipped". */
   tip?: (s: Sums) => string | null
   /** Metrics that read a different query than the active cohort's default. */
-  route?: 'delivery' | 'placed' | 'shiplate' | 'shipdate' | 'partsmed'
+  route?: 'delivery' | 'placed' | 'shiplate' | 'shipdate' | 'partsmed' | 'quoted'
 }
 
 // Numeric fields returned by each explorer query (mock keys === SQL aliases).
@@ -54,6 +54,8 @@ export const SHIP_LATE_FIELDS = ['orders_due', 'orders_shipped', 'shipped_on_tim
 export const SHIP_DATE_FIELDS = ['orders_shipped'] as const
 
 export const PARTS_MED_FIELDS = ['n_orders', 'median_parts', 'median_weighted'] as const
+
+export const QUOTED_LEAD_FIELDS = ['n_orders', 'lead_weighted'] as const
 
 
 const field =
@@ -193,6 +195,20 @@ export const PARTS_MED_METRIC: MetricDef = {
   weight: field('n_orders'),
   format: (v) => fmtNum(v, 1),
   route: 'partsmed',
+}
+
+/**
+ * Quoted lead time — the ship promise made at order time (submitted → governed
+ * due date, business days Mon–Fri). Order-placed cohort; average per period.
+ */
+export const QUOTED_LEAD_METRIC: MetricDef = {
+  key: 'quoted_lead_days',
+  label: 'Quoted lead time (biz days)',
+  kind: 'days',
+  compute: ratio('lead_weighted', 'n_orders'),
+  weight: field('n_orders'),
+  format: (v) => fmtNum(v, 1),
+  route: 'quoted',
 }
 
 export const PLACED_METRICS: MetricDef[] = [

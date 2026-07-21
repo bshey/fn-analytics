@@ -285,6 +285,96 @@ ORDER BY period, breakdown`
   },
 
   /**
+   * Quoted lead time — the SHIP promise made at order time: business days
+   * (Mon–Fri, holidays not excluded) from submission to the governed
+   * channel-aware due date. Order-placed cohort, so this tracks quoting
+   * policy over time regardless of what production later did.
+   */
+  quoted_lead_time: {
+    description:
+      'Quoted lead time per period × breakdown, order-placed cohort (submitted_at, QUOTING excluded, ship_by required): business days (Mon–Fri, holidays not excluded) from order submission to the governed channel-aware due date (Xometry ship_by stored 23:59 ET). lead_weighted = summed lead days so the client derives the average as lead_weighted ÷ n_orders; median_lead rides along for CSV. Negative leads (due before submission — data errors) are dropped. Channel/material/mfg filters and the order-size decile filter apply.',
+    source: 'fcm_api_order (+ f_orders classification, governed due-date rule)',
+    params: zOrdersExplorer,
+    sql: (p, ctx) => {
+      const breakdown =
+        p.breakdown === 'none'
+          ? `'All'`
+          : p.breakdown === 'reporting_category'
+            ? 'c.reporting_category'
+            : p.breakdown === 'materials'
+              ? `IFNULL(op.materials, 'Unknown')`
+              : p.breakdown === 'manufacturing_types'
+                ? `IFNULL(op.manufacturing_types, 'Unknown')`
+                : `IFNULL(c.manufacturing_location, 'Unknown')`
+      const dec = partsDecileFilter(p.partsBuckets, 'classified')
+      return `
+WITH ${classifiedOrdersCTEs(
+        `o.status != 'QUOTING' AND o.submitted_at IS NOT NULL AND o.ship_by IS NOT NULL
+    AND DATE(o.submitted_at) BETWEEN ${sqlDate(p.start)} AND ${sqlDate(p.end)}`,
+        ctx.exclusions.revenueSentinelBillingId,
+      )}${dec.ctes},
+op AS (
+  SELECT p.order_id,
+         STRING_AGG(DISTINCT NULLIF(p.material, ''), ', ' ORDER BY NULLIF(p.material, '')) AS materials,
+         STRING_AGG(DISTINCT NULLIF(p.manufacturing_type, ''), ', ' ORDER BY NULLIF(p.manufacturing_type, '')) AS manufacturing_types
+  FROM ${T.orderPart} p
+  WHERE p.order_id IN (SELECT id FROM classified)
+  GROUP BY p.order_id
+),
+bcal AS (
+  SELECT d, ROW_NUMBER() OVER (ORDER BY d) AS idx
+  FROM UNNEST(GENERATE_DATE_ARRAY(DATE_SUB(${sqlDate(p.start)}, INTERVAL 30 DAY), DATE_ADD(${sqlDate(p.end)}, INTERVAL 120 DAY))) AS d
+  WHERE EXTRACT(DAYOFWEEK FROM d) NOT IN (1, 7)
+),
+base AS (
+  SELECT c.id, c.reporting_category, c.manufacturing_location, DATE(c.submitted_at) AS sub_date,
+         bd.idx - bs.idx AS lead_days
+  FROM classified c
+  JOIN bcal bs ON bs.d = (SELECT MIN(d) FROM bcal WHERE d >= DATE(c.submitted_at))
+  JOIN bcal bd ON bd.d = (SELECT MIN(d) FROM bcal WHERE d >= ${governedDueDateExpr('c')})
+)
+SELECT
+  CAST(${grainExpr('c.sub_date', p.grain)} AS STRING) AS period,
+  CAST(${breakdown} AS STRING) AS breakdown,
+  COUNT(*) AS n_orders,
+  SUM(c.lead_days) AS lead_weighted,
+  APPROX_QUANTILES(c.lead_days, 100)[OFFSET(50)] AS median_lead
+FROM base c
+LEFT JOIN op ON op.order_id = c.id
+WHERE c.lead_days >= 0
+  ${classifiedChannelFilter(p.channels, 'c')}
+  ${orderPartFilters(p, 'c')}
+  ${dec.cond('c')}
+GROUP BY period, breakdown
+ORDER BY period, breakdown`
+    },
+    mock: (p) => {
+      const r = rng(`qlt:${p.grain}:${p.breakdown}`)
+      const scale = p.grain === 'day' ? 1 / 7 : p.grain === 'week' ? 1 : p.grain === 'month' ? 4.3 : p.grain === 'quarter' ? 13 : 52
+      const groups =
+        p.breakdown === 'none'
+          ? ['All']
+          : p.breakdown === 'reporting_category'
+            ? [...(p.channels.length ? p.channels : MOCK_CHANNELS)]
+            : p.breakdown === 'materials'
+              ? MOCK_MATERIALS.map((m) => m.code)
+              : p.breakdown === 'manufacturing_types'
+                ? [...MOCK_MFG_TYPES]
+                : ['Somerville', 'Milwaukee']
+      const rows: Row[] = []
+      for (const period of periodsBetween(p.start, p.end, p.grain)) {
+        for (const g of groups) {
+          const w = p.breakdown === 'reporting_category' ? (CHANNEL_WEIGHT[g] ?? 0.1) : 1 / groups.length
+          const n = Math.max(1, Math.round((36 + r() * 44) * w * scale))
+          const avg = 4 + r() * 5
+          rows.push({ period, breakdown: g, n_orders: n, lead_weighted: Math.round(avg * n), median_lead: Math.round(avg) })
+        }
+      }
+      return rows
+    },
+  },
+
+  /**
    * On-time DELIVERY — cohorted by the quoted delivery date the customer saw
    * at checkout (medusa metadata.estimated_delivery_dates[shipping option]),
    * with delivery detected from ShipStation SHIPPING_UPDATE events (status DE).

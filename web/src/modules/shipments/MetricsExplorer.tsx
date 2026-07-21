@@ -17,6 +17,8 @@ import {
   OTD_METRIC,
   PARTS_MED_FIELDS,
   PARTS_MED_METRIC,
+  QUOTED_LEAD_FIELDS,
+  QUOTED_LEAD_METRIC,
   SHIP_1D_METRIC,
   SHIP_DATE_FIELDS,
   SHIP_LATE_FIELDS,
@@ -67,7 +69,10 @@ export function MetricsExplorer() {
   const [stackMode, setStackMode] = useState<StackMode>('stacked')
   const chartRef = useRef<EChartHandle>(null)
 
-  const metrics = cohort === 'ship' ? [...SHIP_METRICS, SHIP_1D_METRIC, OTD_METRIC, OTD_1D_METRIC, PARTS_MED_METRIC] : [...PLACED_METRICS, PARTS_MED_METRIC]
+  const metrics =
+    cohort === 'ship'
+      ? [...SHIP_METRICS, SHIP_1D_METRIC, OTD_METRIC, OTD_1D_METRIC, PARTS_MED_METRIC, QUOTED_LEAD_METRIC]
+      : [...PLACED_METRICS, PARTS_MED_METRIC, QUOTED_LEAD_METRIC]
   const breakdowns = cohort === 'ship' ? SHIP_BREAKDOWNS : PLACED_BREAKDOWNS
   // Clamp state when the cohort toggle invalidates the current selection.
   const baseMetric: MetricDef = metrics.find((m) => m.key === metricKey) ?? metrics[0]
@@ -104,7 +109,7 @@ export function MetricsExplorer() {
   // Orders shipped (by ship date) → shipped_by_ship_date (UTC ship-date buckets,
   // the legacy Looker convention); Bookings → orders_explorer (order-placed
   // cohort) so it always matches Looker.
-  const effCohort: 'delivery' | 'placed' | 'ship' | 'shiplate' | 'shipdate' | 'partsmed' =
+  const effCohort: 'delivery' | 'placed' | 'ship' | 'shiplate' | 'shipdate' | 'partsmed' | 'quoted' =
     metric.route === 'delivery'
       ? 'delivery'
       : metric.route === 'shiplate'
@@ -113,11 +118,13 @@ export function MetricsExplorer() {
           ? 'shipdate'
           : metric.route === 'partsmed'
             ? 'partsmed'
-            : metric.route === 'placed'
-              ? 'placed'
-              : cohort === 'ship'
-                ? 'ship'
-                : 'placed'
+            : metric.route === 'quoted'
+              ? 'quoted'
+              : metric.route === 'placed'
+                ? 'placed'
+                : cohort === 'ship'
+                  ? 'ship'
+                  : 'placed'
   const fields =
     effCohort === 'delivery'
       ? DELIVERY_FIELDS
@@ -127,9 +134,11 @@ export function MetricsExplorer() {
           ? SHIP_DATE_FIELDS
           : effCohort === 'partsmed'
             ? PARTS_MED_FIELDS
-            : effCohort === 'placed'
-              ? PLACED_FIELDS
-              : SHIP_FIELDS
+            : effCohort === 'quoted'
+              ? QUOTED_LEAD_FIELDS
+              : effCohort === 'placed'
+                ? PLACED_FIELDS
+                : SHIP_FIELDS
   const queryName =
     effCohort === 'delivery'
       ? 'delivery_kpis'
@@ -139,9 +148,11 @@ export function MetricsExplorer() {
           ? 'shipped_by_ship_date'
           : effCohort === 'partsmed'
             ? 'parts_per_order'
-            : effCohort === 'placed'
-              ? 'orders_explorer'
-              : 'shipments_explorer'
+            : effCohort === 'quoted'
+              ? 'quoted_lead_time'
+              : effCohort === 'placed'
+                ? 'orders_explorer'
+                : 'shipments_explorer'
   const params = { ...queryParams, breakdown: breakdown.value, partsBuckets: partsBuckets.map(Number) }
   const q = useNamedQuery(queryName, params)
   const prior = priorRange(queryParams.start, queryParams.end)
@@ -287,7 +298,12 @@ export function MetricsExplorer() {
   )
 
   const info =
-    effCohort === 'partsmed'
+    effCohort === 'quoted'
+      ? {
+          definition: `Average quoted lead time by ${queryParams.grain}: business days (Mon-Fri, holidays not excluded) from order submission to the governed channel-aware due date (Xometry ship_by stored 23:59 ET) — the ship promise made at order time, keyed to the order-placed cohort so it tracks quoting policy regardless of what production later did. Averages are derived from summed lead-days ÷ orders (never averaged rates). Channel/material/mfg filters and the order-size percentile filter apply.`,
+          source: q.data?.meta.source ?? 'fcm_api_order (+ f_orders classification)',
+        }
+      : effCohort === 'partsmed'
       ? {
           definition: `Median ordered part quantity per order by ${queryParams.grain}, order-placed cohort (submitted_at, QUOTING excluded). Medians are computed in SQL per period and group; when groups fold into 'Other' or the window table spans periods, the shown value is the order-count-weighted average of group medians (an approximation — exact within any single period x group). Channel/material/mfg filters and the order-size percentile filter apply.`,
           source: q.data?.meta.source ?? 'fcm_api_order + fcm_api_orderpart',
