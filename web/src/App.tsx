@@ -10,6 +10,7 @@ import CsPage from './modules/cs'
 import NpsPage from './modules/nps'
 import BowlerPage from './modules/bowler'
 import RmaPage from './modules/rma'
+import LeadTimePage from './modules/leadtime'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -37,6 +38,7 @@ export default function App() {
               <Route path="/nps" element={<NpsPage />} />
               <Route path="/bowler" element={<BowlerPage />} />
               <Route path="/rma" element={<RmaPage />} />
+              <Route path="/leadtime" element={<LeadTimePage />} />
               <Route path="*" element={<Navigate to="/shipments" replace />} />
             </Route>
           </Routes>

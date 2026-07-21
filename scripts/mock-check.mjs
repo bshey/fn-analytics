@@ -36,6 +36,7 @@ const CASES = [
   ['ship_late_kpis', { ...range, breakdown: 'reporting_category' }],
   ['shipped_by_ship_date', { ...range, breakdown: 'reporting_category' }],
   ['shipped_by_ship_date', { ...range, grain: 'day', breakdown: 'none' }],
+  ['leadtime_lines', range],
   ['bowler_ship_days', range],
   ['bowler_utilization', range],
   ['bowler_yield', range],
