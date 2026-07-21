@@ -192,7 +192,14 @@ export default function NpsPage() {
       {
         header: 'Comment',
         accessorKey: 'comment',
-        cell: ({ row }) => <HoverReveal text={String(row.original.comment ?? '')} className="block max-w-[42rem] truncate" />,
+        cell: ({ row }) => {
+          const v = String(row.original.comment ?? '').trim()
+          return v ? (
+            <span className="block max-w-[46rem] whitespace-pre-wrap break-words text-[12.5px] leading-snug">{v}</span>
+          ) : (
+            <span className="text-faint">—</span>
+          )
+        },
         meta: { className: 'w-full' },
       },
       {
