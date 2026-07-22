@@ -1,4 +1,5 @@
 import { config } from './config.js'
+import { cacheKey } from './cache.js'
 
 export interface QueryResultData {
   columns: { name: string; type: string }[]
@@ -16,7 +17,11 @@ export class RedashError extends Error {
 }
 
 const POLL_INTERVAL_MS = 700
-const POLL_CAP_MS = 60_000
+// Wide-window scans (decile NTILE queries, year ranges) can legitimately run
+// past a minute; when we give up Redash keeps crunching anyway, so a short cap
+// just surfaces spurious timeouts. Node's default request timeout is 300s —
+// stay under it.
+const POLL_CAP_MS = 180_000
 const REQUEST_TIMEOUT_MS = 30_000
 
 function headers(): Record<string, string> {
@@ -64,11 +69,27 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
+/** One in-flight Redash job per identical (SQL, freshness) pair — a client
+ * retry or a twin panel asking the same thing shares the job instead of
+ * launching a duplicate warehouse scan. */
+const redashInflight = new Map<string, Promise<QueryResultData>>()
+
 /**
  * Run SQL through Redash (submit → poll job → fetch result).
  * maxAge > 0 lets Redash serve a cached result for identical SQL; 0 forces a fresh run.
  */
 export async function runRedashQuery(sql: string, { maxAge = 3600 } = {}): Promise<QueryResultData> {
+  const key = `${cacheKey(sql)}:${maxAge > 0 ? 'cached' : 'fresh'}`
+  let p = redashInflight.get(key)
+  if (!p) {
+    p = runRedashQueryUncoalesced(sql, { maxAge })
+    p.finally(() => redashInflight.delete(key)).catch(() => {})
+    redashInflight.set(key, p)
+  }
+  return p
+}
+
+async function runRedashQueryUncoalesced(sql: string, { maxAge = 3600 } = {}): Promise<QueryResultData> {
   if (!config.apiKey) {
     throw new RedashError(
       'REDASH_API_KEY is not set.',
@@ -103,9 +124,9 @@ export async function runRedashQuery(sql: string, { maxAge = 3600 } = {}): Promi
   }
   if (!resultId) {
     throw new RedashError(
-      'Query timed out after 60s of polling.',
+      `Query timed out after ${Math.round(POLL_CAP_MS / 1000)}s of polling.`,
       504,
-      'Large warehouse scans can take a while — try a narrower date range, or retry.',
+      'Redash may still finish the scan — retrying shortly often returns its cached result. Otherwise try a narrower date range.',
     )
   }
 
