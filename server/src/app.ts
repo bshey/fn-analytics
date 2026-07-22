@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { config, loadExclusions, repoRoot } from './config.js'
 import { runRedashQuery, RedashError } from './redash.js'
-import { cacheKey, cacheGet, cacheSet } from './cache.js'
+import { cacheKey, cacheGet, cacheSet, staleGet, staleSet } from './cache.js'
 import { registry } from './queries/index.js'
 import { mapMaterialRows } from './queries/dims.js'
 import type { Row } from './registry.js'
@@ -179,6 +179,26 @@ function formlabsRoute(name: string, ttlSeconds: number, live: () => Promise<Row
 }
 
 /** Intercom-backed Customer Service endpoints — same envelope, same caching pattern. */
+/** One in-flight crunch per cache key — concurrent identical requests (two
+ * tabs, client retries, bowler + CS asking the same window) share it instead
+ * of each launching their own multi-minute Intercom sweep. */
+const intercomInflight = new Map<string, Promise<{ rows: Row[]; retrievedAt: string }>>()
+
+function intercomFetch(key: string, ttlSeconds: number, live: () => Promise<Row[]>): Promise<{ rows: Row[]; retrievedAt: string }> {
+  let p = intercomInflight.get(key)
+  if (!p) {
+    p = (async () => {
+      const payload = { rows: await live(), retrievedAt: new Date().toISOString() }
+      cacheSet(key, payload, ttlSeconds)
+      staleSet(key, payload)
+      return payload
+    })()
+    p.finally(() => intercomInflight.delete(key)).catch(() => {})
+    intercomInflight.set(key, p)
+  }
+  return p
+}
+
 function intercomRoute(name: string, ttlSeconds: number, live: () => Promise<Row[]>, mock: () => Row[]): express.RequestHandler {
   return async (req, res) => {
     try {
@@ -198,10 +218,22 @@ function intercomRoute(name: string, ttlSeconds: number, live: () => Promise<Row
           res.json({ rows: hit.rows, meta: { ...meta, mock: false, cached: true, retrievedAt: hit.retrievedAt } })
           return
         }
+        // Stale-while-revalidate: serve the last-known-good rows instantly
+        // (they survive TTL expiry and restarts on disk) and refresh in the
+        // background — cold Intercom crunches take minutes and used to leave
+        // the tab looking like it wasn't loading at all.
+        const stale = staleGet<{ rows: Row[]; retrievedAt: string }>(key)
+        if (stale) {
+          intercomFetch(key, ttlSeconds, live).catch(() => {}) // background; errors retried on next request
+          res.json({
+            rows: stale.data.rows,
+            meta: { ...meta, mock: false, cached: true, stale: true, retrievedAt: stale.data.retrievedAt },
+          })
+          return
+        }
       }
-      const rows = await live()
-      cacheSet(key, { rows, retrievedAt: meta.retrievedAt }, ttlSeconds)
-      res.json({ rows, meta: { ...meta, mock: false } })
+      const payload = await intercomFetch(key, ttlSeconds, live)
+      res.json({ rows: payload.rows, meta: { ...meta, mock: false, retrievedAt: payload.retrievedAt } })
     } catch (e) {
       if (e instanceof IntercomError) {
         res.status(e.status).json({ error: e.message, hint: e.hint })

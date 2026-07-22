@@ -37,23 +37,34 @@ export function hasIntercomCreds(): boolean {
 }
 
 async function ic<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    method: body ? 'POST' : 'GET',
-    headers: {
-      Authorization: `Bearer ${config.intercomToken}`,
-      'Intercom-Version': '2.11',
-      ...(body ? { 'Content-Type': 'application/json' } : {}),
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  })
-  if (res.status === 401) {
-    throw new IntercomError('Intercom rejected the token (401)', 502, 'Check INTERCOM_ACCESS_TOKEN in .env.')
+  // Rate limits and transient 5xx get retried with backoff — panels fire many
+  // pooled calls at once, and a single instant-fail 429 used to kill a whole
+  // multi-minute crunch right at the end.
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${BASE}${path}`, {
+      method: body ? 'POST' : 'GET',
+      headers: {
+        Authorization: `Bearer ${config.intercomToken}`,
+        'Intercom-Version': '2.11',
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    })
+    if (res.status === 401) {
+      throw new IntercomError('Intercom rejected the token (401)', 502, 'Check INTERCOM_ACCESS_TOKEN in .env.')
+    }
+    if ((res.status === 429 || res.status >= 500) && attempt < 4) {
+      const retryAfter = Number(res.headers.get('Retry-After'))
+      const waitMs = Math.min(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1000 * 2 ** attempt, 15000)
+      await new Promise((r) => setTimeout(r, waitMs))
+      continue
+    }
+    if (res.status === 429) {
+      throw new IntercomError('Intercom rate limit hit (429)', 502, 'Wait a minute and refresh — results are cached once loaded.')
+    }
+    if (!res.ok) throw new IntercomError(`Intercom API ${path.split('?')[0]}: HTTP ${res.status}`)
+    return (await res.json()) as T
   }
-  if (res.status === 429) {
-    throw new IntercomError('Intercom rate limit hit (429)', 502, 'Wait a minute and refresh — results are cached once loaded.')
-  }
-  if (!res.ok) throw new IntercomError(`Intercom API ${path.split('?')[0]}: HTTP ${res.status}`)
-  return (await res.json()) as T
 }
 
 interface SearchConversation {
@@ -223,7 +234,7 @@ export async function fetchCsEmails(start: string, end: string): Promise<Row[]> 
 
   const emailConvs = seen.filter((c) => c.source?.type === 'email')
   const appId = await getAppId()
-  const results = await pool(emailConvs, 8, async (c) => {
+  const results = await pool(emailConvs, 16, async (c) => {
     const key = `${c.id}:${c.updated_at}`
     const hit = convCache.get(key)
     if (hit) return hit
@@ -245,9 +256,12 @@ export async function fetchCsEmails(start: string, end: string): Promise<Row[]> 
 
 /**
  * Conversation ratings (CSAT) left in [start, end]. Ratings ride on the search
- * response, so this needs no per-conversation fetches. A new rating bumps the
- * conversation's updated_at, so searching on updated_at catches ratings left
- * on old threads; the rating's own created_at does the range filtering.
+ * response, so this needs no per-conversation fetches. A rating only exists
+ * where one was REQUESTED, and conversation_rating.requested_at is a searchable
+ * field — so the search matches just the rating-requested conversations
+ * (~1% of "everything updated since start", which this used to scan for
+ * minutes). 30 days of slack before the window catches ratings left late on
+ * old requests; the rating's own created_at still does the range filtering.
  */
 export async function fetchCsRatings(start: string, end: string): Promise<Row[]> {
   const startTs = Math.floor(new Date(`${start}T00:00:00-05:00`).getTime() / 1000)
@@ -258,7 +272,7 @@ export async function fetchCsRatings(start: string, end: string): Promise<Row[]>
   let startingAfter: string | undefined
   for (let page = 0; page < 40; page++) {
     const body: Record<string, unknown> = {
-      query: { field: 'updated_at', operator: '>', value: startTs },
+      query: { field: 'conversation_rating.requested_at', operator: '>', value: startTs - 30 * 86400 },
       pagination: { per_page: 150, ...(startingAfter ? { starting_after: startingAfter } : {}) },
     }
     const res = await ic<{ conversations: SearchConversation[]; pages?: { next?: { starting_after?: string } } }>(
