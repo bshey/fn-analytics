@@ -6,6 +6,7 @@ import { orderQueries } from './orders.js'
 import { floorQueries } from './floor.js'
 import { bowlerQueries } from './bowler.js'
 import { leadtimeQueries } from './leadtime.js'
+import { customerQueries } from './customers.js'
 
 export const registry: QueryRegistry = {
   ...dimQueries,
@@ -15,4 +16,5 @@ export const registry: QueryRegistry = {
   ...floorQueries,
   ...bowlerQueries,
   ...leadtimeQueries,
+  ...customerQueries,
 }

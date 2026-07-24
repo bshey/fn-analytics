@@ -10,6 +10,11 @@ const NAV = [
     icon: <path d="M1 4h10v8H1zM11 7h3l1 2v3h-4zM4 12.5a1.2 1.2 0 1 0 0 .01M12 12.5a1.2 1.2 0 1 0 0 .01" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinejoin="round" />,
   },
   {
+    to: '/customers',
+    label: 'Customers',
+    icon: <path d="M6 7.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM1.5 13.5c0-2.5 2-4 4.5-4s4.5 1.5 4.5 4M10.5 7.3a2.2 2.2 0 1 0-1.6-4M11.5 9.8c1.8.4 3 1.7 3 3.7" stroke="currentColor" strokeWidth="1.3" fill="none" strokeLinecap="round" strokeLinejoin="round" />,
+  },
+  {
     to: '/wip',
     label: 'Throughput & WIP',
     icon: <path d="M2 13V8M6 13V3M10 13V6M14 13V9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />,
